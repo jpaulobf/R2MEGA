@@ -1,63 +1,35 @@
-# R2MEGA
+﻿# R2MEGA
 
-<div align="center">
-  ...
-</div>
+A Sega Mega Drive / Genesis emulator in C++, currently at the architectural
+skeleton stage. No games can be run yet.
 
-<br>
-A Sega Mega Drive emulator written from
-scratch in C++, developed alongside R2NES / R2BOY.
+The initial target is NTSC, with cycle accuracy as a long-term goal. The core
+is independent of the planned SDL3 / Dear ImGui frontend.
 
-The project is in early development. 
+## Structure
 
-## Opening a ROM
+- `src/Core/Board`: owns the machine components and will coordinate their clocks.
+- `src/Core/Bus`: separate 68000 and Z80 bus contracts.
+- `src/Core/CPU`, `VDP`, `Audio`, `Cartridge`, `IO`: hardware components.
+- `src/Core/State`: reserved for save states.
+- `src/Systems` and `src/Window`: reserved for application services and frontend.
 
-Use **File > Open** or **Ctrl+O**, then click a ROM to load it immediately.
-Dragging a ROM into the window also loads it directly. ZIP archives are supported:
-the first .sg, .sc, .sms or .gg entry is loaded, using its extension to select
-the system. Stored and DEFLATE entries are supported; ZIP64, encrypted and
-multi-disk archives are not supported. ROMs are limited to 16 MiB and ZIPs to
-128 MiB.
-
-Use **File > Reset** or **F12** to restart the current ROM, and **File > Unload**
-to stop emulation and close the cartridge. Audio preferences stay unchanged.
-
-Press **Pause/Break** to pause or resume. Opening a menu pauses emulation;
-closing it resumes only if you did not pause manually.
-
-## Display
-
-Starts at **3X**. Choose **1X–5X** in **Display**, or press **Ctrl+1–5**.
-The video fills the available area while keeping its aspect ratio.
-Maximizing is allowed; manual resizing is blocked.
-
-
-## Controls
-
-Use **WASD or arrow keys** to move, **K** for button **1**, **J** for button **2**,
-and **Enter** for SG-1000 Pause/Hold or Game Gear Start. **I/U** provide turbo for buttons **1/2**.
-
-SDL-compatible gamepads are detected automatically, including connection and
-removal while running. Two players are supported. See the [input guide](docs/Input.md)
-for gamepad positions and keyboard mappings.
-
+The bus interfaces are starting points, not a complete model of bus timing,
+arbitration, DMA or open-bus behavior. `Board::clock()` explicitly reports
+that scheduling is not implemented. Component classes are placeholders.
 
 ## Building
 
-Requires **CMake 3.16+**, a **C++17 compiler** and **Git**. The first build
-needs internet access to download dependencies.
+Requires CMake 3.16+ and a C++17 compiler. The core builds without external
+dependencies:
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build --config Debug --parallel
-ctest --test-dir build -C Debug --output-on-failure
+cmake -S . -B build
+cmake --build build --config Debug
 ```
 
-The application is generated in `bin/` (or `bin/Debug/`). See the
-[build guide](docs/Building.md) for platform notes and builds without a GUI.
-
-## Documentation
-
+The graphical application and tests have not been implemented yet.
+`R2MEGA_BUILD_GUI=ON` reports this explicitly until the frontend is ready.
 
 ## License
 
