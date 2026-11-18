@@ -2,7 +2,7 @@
 
 namespace R2MEGA::Core
 {
-    // SN76489 programmable sound generator placeholder.
+    // Espaço reservado para o gerador de som programável SN76489.
     class SN76489
     {
     };

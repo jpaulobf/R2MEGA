@@ -2,7 +2,7 @@
 
 namespace R2MEGA::Core
 {
-    // YM2612 FM synthesizer placeholder.
+    // Espaço reservado para o sintetizador FM YM2612.
     class YM2612
     {
     };
