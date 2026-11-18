@@ -9,6 +9,8 @@
 /.vscode/
 
 # Games, saves and boot ROMs
+*.gen
+*.smd
 *.smc
 *.sms
 *.sg
