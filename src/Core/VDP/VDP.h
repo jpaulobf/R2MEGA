@@ -2,7 +2,7 @@
 
 namespace R2MEGA::Core
 {
-    // Mega Drive video display processor placeholder.
+    // Espaço reservado para o processador de vídeo do Mega Drive.
     class VDP
     {
     };

@@ -2,7 +2,7 @@
 
 namespace R2MEGA::Core
 {
-    // Controller ports and peripheral protocol placeholder.
+    // Espaço reservado para as portas de controle e os protocolos dos periféricos.
     class ControllerPorts
     {
     };
