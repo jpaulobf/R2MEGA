@@ -12,8 +12,8 @@
 
 namespace R2MEGA::Core
 {
-    // Owns the components and will coordinate them on a common time base.
-    // Bus mappings, clock ratios, arbitration and DMA remain to be implemented.
+    // Possui os componentes e coordenará todos em uma base de tempo comum.
+    // Mapeamentos dos barramentos, proporções de clock, arbitragem e DMA ainda serão implementados.
     class Board final : public M68KBus, public Z80Bus
     {
     public:
@@ -21,9 +21,10 @@ namespace R2MEGA::Core
         Board(const Board &) = delete;
         Board &operator=(const Board &) = delete;
 
-        // Advance the machine by one master-clock tick (not implemented yet).
+        // Avança a máquina em um ciclo do clock mestre (ainda não implementado).
         void clock();
 
+        // Implementações dos barramentos das CPUs; ainda não fazem o mapeamento.
         std::uint8_t readByte(std::uint32_t address) override;
         std::uint16_t readWord(std::uint32_t address) override;
         void writeByte(std::uint32_t address, std::uint8_t value) override;
