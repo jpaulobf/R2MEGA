@@ -4,8 +4,8 @@
 
 namespace R2MEGA::Core
 {
-    // Byte and word transfers are distinct: the 68000 has byte lane strobes.
-    // Timing, alignment errors and arbitration will be defined with the CPU.
+    // As transferências de byte e palavra são distintas: o 68000 possui sinais de seleção de bytes.
+    // Temporização, erros de alinhamento e arbitragem serão definidos com a CPU.
     class M68KBus
     {
     public:
