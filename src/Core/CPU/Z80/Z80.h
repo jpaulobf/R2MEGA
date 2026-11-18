@@ -4,7 +4,7 @@ namespace R2MEGA::Core
 {
     class Z80Bus;
 
-    // Z80 implementation to be developed against its own bus contract.
+    // Implementação do Z80 a ser desenvolvida com sua interface de barramento.
     class Z80
     {
     public:
@@ -13,6 +13,7 @@ namespace R2MEGA::Core
         Z80 &operator=(const Z80 &) = delete;
 
     private:
+        // Referência não proprietária; o barramento deve sobreviver à CPU.
         Z80Bus &bus_;
     };
 }
