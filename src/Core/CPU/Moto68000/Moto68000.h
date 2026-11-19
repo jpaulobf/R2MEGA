@@ -56,6 +56,11 @@ namespace R2MEGA::Core
         void clockReturn();
         void clockControl();
         void clockExtendedMove();
+        void clockCombinedMove();
+        void finishCombinedMove();
+        void clockTestClearCompare();
+        void clockArithmetic();
+        void clockExtendedArithmetic();
         // A referência não é proprietária; o barramento deve sobreviver à CPU.
         M68KBus &bus_;
         State state_;
@@ -95,7 +100,11 @@ namespace R2MEGA::Core
             Lea,
             Load,
             Store,
-            ExtendedMove
+            ExtendedMove,
+            CombinedMove,
+            TestClearCompare,
+            Arithmetic,
+            ExtendedArithmetic
         };
         MemoryOp memoryOp_ = MemoryOp::None;
         unsigned memoryStage_ = 0;
@@ -123,6 +132,116 @@ namespace R2MEGA::Core
             std::uint32_t address = 0;
             std::uint32_t value = 0;
         } extendedMove_;
+        // Separa as extensões da origem e do destino na ordem em que chegam da pré-busca.
+        struct CombinedMove
+        {
+            enum class Phase
+            {
+                SourceExtensions,
+                SourceIdle,
+                SourceRead,
+                TargetExtensions,
+                PrefetchBeforeWrite,
+                Write,
+                PrefetchAfterWrite
+            };
+            Phase phase = Phase::SourceExtensions;
+            unsigned size = 2;
+            unsigned sourceMode = 0, sourceReg = 0;
+            unsigned targetMode = 0, targetReg = 0;
+            unsigned sourceExtensions = 0, targetExtensions = 0;
+            unsigned sourceFetchesLeft = 0, targetFetchesLeft = 0;
+            unsigned streamIndex = 2;
+            unsigned sourceReads = 0, targetWrites = 0;
+            unsigned sourceIdle = 0;
+            bool immediate = false;
+            bool specialAbsoluteLong = false;
+            bool sourceAddressReady = false, targetAddressReady = false;
+            std::array<std::uint16_t, 2> sourceExtension{};
+            std::array<std::uint16_t, 2> targetExtension{};
+            std::uint16_t nextOpcode = 0, nextFollowing = 0;
+            std::uint32_t sourceAddress = 0, targetAddress = 0, value = 0;
+        } combinedMove_;
+        // Conserva extensões, leitura e pré-busca de teste, limpeza e comparação.
+        struct TestClearCompare
+        {
+            enum class Kind
+            {
+                Test,
+                Clear,
+                Compare,
+                CompareAddress
+            };
+            enum class Phase
+            {
+                Extensions,
+                Idle,
+                Read,
+                Prefetch,
+                Write
+            };
+            Kind kind = Kind::Test;
+            Phase phase = Phase::Extensions;
+            unsigned size = 2, mode = 0, reg = 0, destination = 0;
+            unsigned extensions = 0, fetchesLeft = 0, streamIndex = 2;
+            unsigned idle = 0, reads = 0, writes = 0;
+            bool addressReady = false;
+            std::array<std::uint16_t, 2> extension{};
+            std::uint16_t nextOpcode = 0, nextFollowing = 0;
+            std::uint32_t address = 0, value = 0;
+        } testClearCompare_;
+        // Guarda operandos e extensões até terminar a sequência de ADD/SUB.
+        struct Arithmetic
+        {
+            enum class Logic
+            {
+                None,
+                And,
+                Or,
+                Xor
+            };
+            enum class Phase
+            {
+                Extensions,
+                Idle,
+                Read,
+                Prefetch,
+                Write
+            };
+            Phase phase = Phase::Extensions;
+            Logic logic = Logic::None;
+            bool subtract = false, addressDestination = false, memoryDestination = false;
+            bool immediateInstruction = false, quickInstruction = false;
+            unsigned size = 2, mode = 0, reg = 0, dataReg = 0;
+            unsigned quickCount = 0;
+            unsigned extensions = 0, immediateWords = 0, fetchesLeft = 0, streamIndex = 2;
+            unsigned idle = 0, reads = 0, writes = 0;
+            bool addressReady = false;
+            std::array<std::uint16_t, 4> extension{};
+            std::uint16_t nextOpcode = 0, nextFollowing = 0;
+            std::uint16_t flags = 0;
+            std::uint32_t address = 0, operand = 0, result = 0;
+        } arithmetic_;
+        // ADDX/SUBX e CMPM leem a origem antes do destino.
+        struct ExtendedArithmetic
+        {
+            enum class Phase
+            {
+                Idle,
+                SourceRead,
+                TargetRead,
+                Prefetch,
+                Write
+            };
+            Phase phase = Phase::Idle;
+            bool subtract = false, memory = false, compareMemory = false;
+            unsigned size = 2, sourceReg = 0, targetReg = 0;
+            unsigned idle = 0, sourceReads = 0, targetReads = 0, writes = 0;
+            bool sourceAddressReady = false, targetAddressReady = false;
+            std::uint16_t nextOpcode = 0, nextFollowing = 0, flags = 0;
+            std::uint32_t sourceAddress = 0, targetAddress = 0;
+            std::uint32_t source = 0, target = 0, result = 0;
+        } extendedArithmetic_;
         std::uint8_t pendingByte_ = 0;
         bool halted_ = false;
         bool exceptionActive_ = false;
