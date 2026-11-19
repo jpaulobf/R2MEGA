@@ -16,6 +16,45 @@ namespace R2MEGA::Core
             return value & 0x80 ? int(value) - 0x100 : int(value);
         }
 
+        struct ShiftResult
+        {
+            std::uint32_t value = 0;
+            std::uint16_t flags = 0;
+        };
+
+        ShiftResult shifted(std::uint32_t value, unsigned bits, unsigned kind,
+                            bool left, unsigned count, std::uint16_t sr)
+        {
+            const std::uint32_t mask = bits == 32 ? 0xffffffffu : (1u << bits) - 1;
+            const std::uint32_t sign = 1u << (bits - 1);
+            value &= mask;
+            bool extend = (sr & 0x10) != 0;
+            bool carry = kind == 2 && count == 0 ? extend : false;
+            bool overflow = false;
+            for (unsigned i = 0; i < count; ++i)
+            {
+                const bool outgoing = left ? (value & sign) != 0 : (value & 1) != 0;
+                const bool incoming = kind == 2 ? extend : kind == 3 ? outgoing
+                                                                     : false;
+                const std::uint32_t previous = value;
+                if (left)
+                    value = ((value << 1) | (incoming ? 1u : 0u)) & mask;
+                else
+                    value = (value >> 1) |
+                            (kind == 0 ? previous & sign : incoming ? sign
+                                                                    : 0u);
+                if (kind == 0 && left && ((previous ^ value) & sign))
+                    overflow = true;
+                carry = outgoing;
+                if (kind != 3)
+                    extend = outgoing;
+            }
+            return {value, static_cast<std::uint16_t>(
+                               (extend ? 0x10 : 0) | (value & sign ? 0x08 : 0) |
+                               (value == 0 ? 0x04 : 0) | (overflow ? 0x02 : 0) |
+                               (carry ? 0x01 : 0))};
+        }
+
         bool branchCondition(unsigned condition, std::uint16_t sr)
         {
             const bool n = (sr & 8) != 0, z = (sr & 4) != 0;
@@ -220,6 +259,7 @@ namespace R2MEGA::Core
     {
         exceptionActive_ = true;
         exceptionLongFrame_ = longFrame;
+        exceptionAccurateAddress_ = false;
         exceptionInstructionContext_ = instructionContext;
         interruptException_ = false;
         interruptAcknowledged_ = false;
@@ -248,21 +288,45 @@ namespace R2MEGA::Core
     void Moto68000::beginFault(unsigned vector, std::uint32_t address, bool write,
                                unsigned functionCode)
     {
+        const bool accurateAddress = vector == 3 &&
+                                     (memoryOp_ == MemoryOp::MultiplyDivide ||
+                                      memoryOp_ == MemoryOp::Arithmetic ||
+                                      memoryOp_ == MemoryOp::TestClearCompare);
         const bool processingException = exceptionActive_ && !exceptionInstructionContext_;
         const std::uint16_t faultIr = returnActive_ ? returnIr_ : controlOp_ != ControlOp::None ? controlIr_
                                                                                                 : state_.prefetch[0];
         const unsigned writes = exceptionLongFrame_ ? 7 : 3;
+        const unsigned mode = memoryOp_ == MemoryOp::MultiplyDivide     ? multiplyDivide_.mode
+                              : memoryOp_ == MemoryOp::Arithmetic       ? arithmetic_.mode
+                              : memoryOp_ == MemoryOp::TestClearCompare ? testClearCompare_.mode
+                                                                        : 0;
+        const unsigned reg = memoryOp_ == MemoryOp::MultiplyDivide     ? multiplyDivide_.reg
+                             : memoryOp_ == MemoryOp::Arithmetic       ? arithmetic_.reg
+                             : memoryOp_ == MemoryOp::TestClearCompare ? testClearCompare_.reg
+                                                                       : 0;
+        const unsigned immediatePc = memoryOp_ == MemoryOp::Arithmetic && arithmetic_.immediateInstruction ? 2 : 0;
         const std::uint32_t savedPc = exceptionActive_ && exceptionStage_ >= writes
                                           ? exceptionVector_ * 4
+                                      : accurateAddress
+                                          ? state_.pc + immediatePc +
+                                                (mode == 4 || (mode == 7 && reg == 0) ? 4
+                                                 : mode == 7 && reg == 1              ? 6
+                                                                                      : 2)
                                           : state_.pc;
-        // O PC empilhado segue o início da instrução nesta implementação.
+        // O PC salvo depende do estágio do cálculo do endereço efetivo.
         beginException(vector, savedPc, true);
+        exceptionAccurateAddress_ = accurateAddress;
+        if (accurateAddress)
+            exceptionIdle_ += 6;
         traceDeferred_ = false;
         exceptionIr_ = faultIr;
         exceptionAddress_ = address;
         // I/N distingue processamento de instrução e processamento de exceção.
         // R/W ocupa o bit 4; I/N, o bit 3; o código de função, os bits 2..0.
-        exceptionStatus_ = (write ? 0 : 0x10) | (processingException ? 0x08 : 0) | static_cast<std::uint16_t>(functionCode);
+        exceptionStatus_ = (accurateAddress ? faultIr & 0xffe0 : 0) |
+                           (write ? 0 : 0x10) |
+                           (processingException ? 0x08 : 0) |
+                           static_cast<std::uint16_t>(functionCode);
     }
 
     void Moto68000::clockException()
@@ -281,17 +345,29 @@ namespace R2MEGA::Core
         }
         if (exceptionStage_ < writes)
         {
-            // A pilha cresce para baixo; a última escrita deixa o SR no topo.
+            // O quadro de endereço escreve palavras fora da ordem crescente da pilha.
             const std::uint16_t longWords[] = {
+                static_cast<std::uint16_t>(exceptionPc_), exceptionSr_,
+                static_cast<std::uint16_t>(exceptionPc_ >> 16), exceptionIr_,
+                static_cast<std::uint16_t>(exceptionAddress_), exceptionStatus_,
+                static_cast<std::uint16_t>(exceptionAddress_ >> 16)};
+            const std::uint16_t legacyLongWords[] = {
                 exceptionStatus_, static_cast<std::uint16_t>(exceptionAddress_),
                 static_cast<std::uint16_t>(exceptionAddress_ >> 16), exceptionIr_,
                 static_cast<std::uint16_t>(exceptionPc_),
                 static_cast<std::uint16_t>(exceptionPc_ >> 16), exceptionSr_};
+            const unsigned longOffsets[] = {2, 6, 4, 8, 10, 14, 12};
             const std::uint16_t shortWords[] = {
                 static_cast<std::uint16_t>(exceptionPc_),
                 static_cast<std::uint16_t>(exceptionPc_ >> 16), exceptionSr_};
-            const auto result = transfer(state_.address[7] - 2, false, true,
-                                         exceptionLongFrame_ ? longWords[exceptionStage_] : shortWords[exceptionStage_], 5);
+            const auto stackAddress = exceptionAccurateAddress_
+                                          ? state_.address[7] + exceptionStage_ * 2 - longOffsets[exceptionStage_]
+                                          : state_.address[7] - 2;
+            const auto result = transfer(stackAddress, false, true,
+                                         exceptionLongFrame_ ? (exceptionAccurateAddress_ ? longWords[exceptionStage_]
+                                                                                          : legacyLongWords[exceptionStage_])
+                                                             : shortWords[exceptionStage_],
+                                         5);
             if (result == TransferResult::Complete)
             {
                 state_.address[7] -= 2;
@@ -311,6 +387,8 @@ namespace R2MEGA::Core
             exceptionTarget_ |= pendingWord_;
         else
             state_.prefetch[read - 2] = pendingWord_;
+        if (exceptionAccurateAddress_ && read == 2)
+            exceptionIdle_ = 2;
         if (++exceptionStage_ == writes + 4)
         {
             state_.pc = exceptionTarget_;
@@ -825,6 +903,8 @@ namespace R2MEGA::Core
                         state_.address[op.reg] -= step;
                     op.address = moveMemoryAddress(op.mode, op.reg, state_.address,
                                                    state_.data, op.extension[0], op.extension[1], state_.pc + 2);
+                    if (op.mode == 3 && op.size == 2)
+                        state_.address[op.reg] += step;
                     op.addressReady = true;
                 }
                 if (transfer(op.address + (op.size == 4 ? op.reads * 2 : 0),
@@ -835,7 +915,7 @@ namespace R2MEGA::Core
                     op.value = op.size == 4 && op.reads == 0 ? part << 16 : op.value | part;
                     if (++op.reads == words)
                     {
-                        if (op.mode == 3)
+                        if (op.mode == 3 && op.size != 2)
                             state_.address[op.reg] += step;
                         op.phase = TestClearCompare::Phase::Prefetch;
                     }
@@ -878,6 +958,23 @@ namespace R2MEGA::Core
                                                                                                           : 0xffu;
             const std::uint32_t sign = op.addressDestination || op.size == 4 ? 0x80000000u : op.size == 2 ? 0x8000u
                                                                                                           : 0x80u;
+            if (op.unary != Arithmetic::Unary::None)
+            {
+                const std::uint32_t value = op.operand & mask;
+                const bool extend = (state_.sr & 0x10) != 0;
+                const bool complement = op.unary == Arithmetic::Unary::Complement;
+                const bool withExtend = op.unary == Arithmetic::Unary::NegateExtend;
+                op.result = complement ? (~value & mask) : (0u - value - (withExtend && extend ? 1u : 0u)) & mask;
+                const bool carry = !complement && (value != 0 || (withExtend && extend));
+                const bool overflow = !complement && value == sign &&
+                                      !(withExtend && extend);
+                const bool zero = withExtend ? (state_.sr & 0x04) && op.result == 0 : op.result == 0;
+                op.flags = (complement ? state_.sr & 0x10 : carry ? 0x10
+                                                                  : 0) |
+                           (op.result & sign ? 0x08 : 0) | (zero ? 0x04 : 0) |
+                           (overflow ? 0x02 : 0) | (carry ? 0x01 : 0);
+                return;
+            }
             const std::uint32_t source = op.quickInstruction ? op.quickCount : op.immediateInstruction             ? (op.size == 4 ? (std::uint32_t(op.extension[0]) << 16) | op.extension[1] : op.extension[0])
                                                                            : op.memoryDestination                  ? state_.data[op.dataReg]
                                                                            : op.addressDestination && op.size == 2 ? static_cast<std::uint32_t>(signedWord(static_cast<std::uint16_t>(op.operand)))
@@ -976,6 +1073,8 @@ namespace R2MEGA::Core
                     op.address = moveMemoryAddress(op.mode, op.reg, state_.address,
                                                    state_.data, op.extension[op.immediateWords],
                                                    op.extension[op.immediateWords + 1], state_.pc + 2);
+                    if (op.mode == 3 && op.size == 2)
+                        state_.address[op.reg] += step;
                     op.addressReady = true;
                 }
                 if (transfer(op.address + (op.size == 4 ? op.reads * 2 : 0),
@@ -989,7 +1088,7 @@ namespace R2MEGA::Core
                     op.operand = op.size == 4 && op.reads == 0 ? part << 16 : op.operand | part;
                     if (++op.reads == words)
                     {
-                        if (op.mode == 3)
+                        if (op.mode == 3 && op.size != 2)
                             state_.address[op.reg] += step;
                         calculate();
                         op.phase = Arithmetic::Phase::Prefetch;
@@ -1010,13 +1109,251 @@ namespace R2MEGA::Core
 
             case Arithmetic::Phase::Write:
             {
-                const std::uint16_t value = op.size == 4 ? static_cast<std::uint16_t>(op.writes == 0 ? op.result >> 16 : op.result) : static_cast<std::uint16_t>(op.result);
-                if (transfer(op.address + (op.size == 4 ? op.writes * 2 : 0),
+                const unsigned word = op.size == 4 ? 1 - op.writes : 0;
+                const std::uint16_t value = op.size == 4
+                                                ? static_cast<std::uint16_t>(word == 0 ? op.result >> 16 : op.result)
+                                                : static_cast<std::uint16_t>(op.result);
+                if (transfer(op.address + word * 2,
                              op.size == 1, true, value, dataCode) == TransferResult::Complete &&
                     ++op.writes == words)
                     finish();
                 return;
             }
+            }
+        }
+    }
+
+    void Moto68000::clockMultiplyDivide()
+    {
+        auto &op = multiplyDivide_;
+        const unsigned dataCode = state_.sr & 0x2000 ? 5 : 1;
+        const unsigned programCode = state_.sr & 0x2000 ? 6 : 2;
+
+        const auto calculate = [&]()
+        {
+            const std::uint32_t dividend = state_.data[op.destination];
+            if (!op.divide)
+            {
+                if (op.signedOperation)
+                    op.result = static_cast<std::uint32_t>(
+                        signedWord(op.source) * signedWord(static_cast<std::uint16_t>(dividend)));
+                else
+                    op.result = std::uint32_t(op.source) * (dividend & 0xffffu);
+                // MULS conta as 16 transições até o zero acrescentado no bit menos significativo.
+                std::uint32_t bits = op.signedOperation
+                                         ? (std::uint32_t(op.source) ^ (std::uint32_t(op.source) << 1)) & 0xffffu
+                                         : op.source;
+                unsigned additions = 0;
+                while (bits)
+                {
+                    additions += bits & 1u;
+                    bits >>= 1;
+                }
+                // 38 + 2n ciclos, incluindo a pré-busca final de quatro ciclos.
+                op.idle += 34 + 2 * additions;
+                return;
+            }
+
+            if (op.source == 0)
+            {
+                ++state_.instructions;
+                const bool traced = traceInstruction_;
+                beginException(5, state_.pc + 2 + op.extensions * 2, false, true);
+                traceDeferred_ = traced;
+                return;
+            }
+
+            if (!op.signedOperation)
+            {
+                const std::uint32_t divisor = op.source;
+                op.overflow = dividend >> 16 >= divisor;
+                if (op.overflow)
+                    op.idle += 6; // Estouro detectado antes das iterações da divisão.
+                else
+                {
+                    const std::uint32_t quotient = dividend / divisor;
+                    op.result = ((dividend % divisor) << 16) | quotient;
+                    unsigned microcycles = 38;
+                    std::uint32_t partial = dividend;
+                    const std::uint32_t shiftedDivisor = divisor << 16;
+                    for (unsigned i = 0; i < 15; ++i)
+                    {
+                        const std::uint32_t previous = partial;
+                        partial <<= 1;
+                        if (previous & 0x80000000u)
+                            partial -= shiftedDivisor;
+                        else
+                        {
+                            microcycles += 2;
+                            if (partial >= shiftedDivisor)
+                            {
+                                partial -= shiftedDivisor;
+                                --microcycles;
+                            }
+                        }
+                    }
+                    op.idle += microcycles * 2 - 4;
+                }
+                return;
+            }
+
+            const std::int64_t signedDividend = static_cast<std::int32_t>(dividend);
+            const std::int64_t signedDivisor = signedWord(op.source);
+            const std::int64_t quotient = signedDividend / signedDivisor;
+            const std::int64_t remainder = signedDividend % signedDivisor;
+            op.overflow = quotient < -32768 || quotient > 32767;
+            if (!op.overflow)
+                op.result = (std::uint32_t(static_cast<std::uint16_t>(remainder)) << 16) |
+                            static_cast<std::uint16_t>(quotient);
+
+            const std::uint64_t absoluteDividend = signedDividend < 0 ? -signedDividend : signedDividend;
+            const std::uint64_t absoluteDivisor = signedDivisor < 0 ? -signedDivisor : signedDivisor;
+            unsigned microcycles = 6 + (signedDividend < 0 ? 1 : 0);
+            if ((absoluteDividend >> 16) >= absoluteDivisor)
+                microcycles += 2;
+            else
+            {
+                microcycles += 55;
+                if (signedDivisor >= 0)
+                {
+                    if (signedDividend < 0)
+                        ++microcycles;
+                    else
+                        --microcycles;
+                }
+                std::uint16_t absoluteQuotient = static_cast<std::uint16_t>(absoluteDividend / absoluteDivisor);
+                for (unsigned i = 0; i < 15; ++i)
+                {
+                    if (!(absoluteQuotient & 0x8000u))
+                        ++microcycles;
+                    absoluteQuotient <<= 1;
+                }
+            }
+            op.idle += microcycles * 2 - 4;
+        };
+
+        const auto finish = [&]()
+        {
+            if (!op.overflow)
+            {
+                state_.data[op.destination] = op.result;
+                const std::uint32_t flagsValue = op.divide ? op.result & 0xffffu : op.result;
+                const bool negative = op.divide ? (flagsValue & 0x8000u) != 0
+                                                : (flagsValue & 0x80000000u) != 0;
+                state_.sr = (state_.sr & ~std::uint16_t(0x1f)) |
+                            (state_.sr & 0x10) | (negative ? 0x08 : 0) |
+                            (flagsValue == 0 ? 0x04 : 0);
+            }
+            else
+                // No 68000, o estouro observado deixa N e V ativos e limpa Z e C.
+                state_.sr = (state_.sr & ~std::uint16_t(0x1f)) |
+                            (state_.sr & 0x10) | 0x0a;
+            state_.prefetch = {op.nextOpcode, op.nextFollowing};
+            state_.pc += 2 + op.extensions * 2;
+            ++state_.instructions;
+            memoryOp_ = MemoryOp::None;
+            tracePending_ = traceInstruction_;
+            traceInstruction_ = false;
+        };
+
+        for (;;)
+        {
+            switch (op.phase)
+            {
+            case MultiplyDivide::Phase::Extensions:
+                if (op.fetchesLeft)
+                {
+                    if (transfer(state_.pc + op.streamIndex * 2, false, false, 0,
+                                 programCode) == TransferResult::Complete)
+                    {
+                        const unsigned index = op.streamIndex++;
+                        if (index <= op.extensions)
+                            op.extension[index - 1] = pendingWord_;
+                        else
+                            op.nextOpcode = pendingWord_;
+                        --op.fetchesLeft;
+                    }
+                    return;
+                }
+                op.phase = MultiplyDivide::Phase::AddressIdle;
+                continue;
+            case MultiplyDivide::Phase::AddressIdle:
+                if (op.idle)
+                {
+                    --op.idle;
+                    bus_.observe(pins_);
+                    return;
+                }
+                op.phase = MultiplyDivide::Phase::Read;
+                continue;
+            case MultiplyDivide::Phase::Read:
+            {
+                const bool memorySource = op.mode != 0 && !(op.mode == 7 && op.reg == 4);
+                if (op.mode == 0 || (op.mode == 7 && op.reg == 4))
+                {
+                    op.source = op.mode == 0 ? static_cast<std::uint16_t>(state_.data[op.reg])
+                                             : op.extension[0];
+                }
+                else
+                {
+                    if (!op.addressReady)
+                    {
+                        if (op.mode == 4)
+                            state_.address[op.reg] -= 2;
+                        op.address = moveMemoryAddress(op.mode, op.reg, state_.address,
+                                                       state_.data, op.extension[0],
+                                                       op.extension[1], state_.pc + 2);
+                        if (op.mode == 3)
+                            state_.address[op.reg] += 2;
+                        op.addressReady = true;
+                    }
+                    if (transfer(op.address, false, false, 0,
+                                 op.mode == 7 && (op.reg == 2 || op.reg == 3)
+                                     ? programCode
+                                     : dataCode) != TransferResult::Complete)
+                        return;
+                    op.source = pendingWord_;
+                }
+                calculate();
+                if (memoryOp_ == MemoryOp::None)
+                {
+                    if (!memorySource)
+                        bus_.observe(pins_);
+                    return;
+                }
+                op.phase = op.divide ? MultiplyDivide::Phase::Internal
+                                     : MultiplyDivide::Phase::Prefetch;
+                if (memorySource)
+                    return;
+                continue;
+            }
+            case MultiplyDivide::Phase::Internal:
+                if (op.idle)
+                {
+                    --op.idle;
+                    if (!op.divide && op.idle == 0)
+                        finish();
+                    bus_.observe(pins_);
+                    return;
+                }
+                if (op.divide)
+                {
+                    op.phase = MultiplyDivide::Phase::Prefetch;
+                    continue;
+                }
+                finish();
+                bus_.observe(pins_);
+                return;
+            case MultiplyDivide::Phase::Prefetch:
+                if (transfer(state_.pc + (op.extensions + 2) * 2, false,
+                             false, 0, programCode) != TransferResult::Complete)
+                    return;
+                op.nextFollowing = pendingWord_;
+                if (op.divide)
+                    finish();
+                else
+                    op.phase = MultiplyDivide::Phase::Internal;
+                return;
             }
         }
     }
@@ -1161,6 +1498,539 @@ namespace R2MEGA::Core
         }
     }
 
+    void Moto68000::clockStatusImmediate()
+    {
+        auto &op = statusImmediate_;
+        const unsigned programCode = state_.sr & 0x2000 ? 6 : 2;
+        switch (op.phase)
+        {
+        case StatusImmediate::Phase::FirstFetch:
+            if (transfer(state_.pc + 4, false, false, 0, programCode) == TransferResult::Complete)
+                op.phase = StatusImmediate::Phase::Idle;
+            return;
+
+        case StatusImmediate::Phase::Idle:
+            --op.idle;
+            if (op.idle == 0)
+            {
+                const bool fullStatus = (op.opcode & 0x0040) != 0;
+                const std::uint16_t mask = fullStatus ? 0xffff : 0x001f;
+                const std::uint16_t source = op.immediate & mask;
+                const std::uint16_t previous = state_.sr;
+                const std::uint16_t result = (op.opcode & 0xff00) == 0x0000 ? previous | source : (op.opcode & 0xff00) == 0x0200 ? previous & source
+                                                                                                                                 : previous ^ source;
+                const std::uint16_t next = (previous & ~mask) | (result & mask);
+                if (fullStatus && (previous & 0x2000) && !(next & 0x2000))
+                {
+                    ssp_ = state_.address[7];
+                    state_.address[7] = usp_;
+                }
+                state_.sr = next;
+                op.phase = StatusImmediate::Phase::OpcodeFetch;
+            }
+            bus_.observe(pins_);
+            return;
+
+        case StatusImmediate::Phase::OpcodeFetch:
+            if (transfer(state_.pc + 4, false, false, 0, programCode) == TransferResult::Complete)
+            {
+                op.nextOpcode = pendingWord_;
+                op.phase = StatusImmediate::Phase::FollowingFetch;
+            }
+            return;
+
+        case StatusImmediate::Phase::FollowingFetch:
+            if (transfer(state_.pc + 6, false, false, 0, programCode) == TransferResult::Complete)
+            {
+                op.nextFollowing = pendingWord_;
+                state_.prefetch = {op.nextOpcode, op.nextFollowing};
+                state_.pc += 4;
+                ++state_.instructions;
+                memoryOp_ = MemoryOp::None;
+                tracePending_ = traceInstruction_;
+                traceInstruction_ = false;
+            }
+            return;
+        }
+    }
+
+    void Moto68000::clockBitOperation()
+    {
+        auto &op = bitOperation_;
+        const unsigned programCode = state_.sr & 0x2000 ? 6 : 2;
+        const unsigned dataCode = state_.sr & 0x2000 ? 5 : 1;
+        const unsigned step = op.reg == 7 ? 2 : 1;
+        const unsigned firstEaExtension = op.staticBit ? 1 : 0;
+
+        const auto calculate = [&]()
+        {
+            op.bit = (op.staticBit ? op.extension[0] : state_.data[op.bitReg]) &
+                     (op.mode == 0 ? 31u : 7u);
+            const std::uint32_t bitMask = 1u << op.bit;
+            op.originalZero = (op.value & bitMask) == 0;
+            op.result = op.kind == 1 ? op.value ^ bitMask : op.kind == 2 ? op.value & ~bitMask
+                                                        : op.kind == 3   ? op.value | bitMask
+                                                                         : op.value;
+        };
+        const auto finish = [&]()
+        {
+            if (op.kind != 0 && op.mode == 0)
+                state_.data[op.reg] = op.result;
+            state_.sr = (state_.sr & ~std::uint16_t(0x04)) |
+                        (op.originalZero ? 0x04 : 0);
+            state_.prefetch = {op.nextOpcode, op.nextFollowing};
+            state_.pc += 2 + op.extensions * 2;
+            ++state_.instructions;
+            memoryOp_ = MemoryOp::None;
+            tracePending_ = traceInstruction_;
+            traceInstruction_ = false;
+        };
+
+        for (;;)
+        {
+            switch (op.phase)
+            {
+            case BitOperation::Phase::Extensions:
+                if (op.fetchesLeft)
+                {
+                    if (transfer(state_.pc + op.streamIndex * 2, false, false,
+                                 0, programCode) == TransferResult::Complete)
+                    {
+                        const unsigned index = op.streamIndex++;
+                        if (index <= op.extensions)
+                            op.extension[index - 1] = pendingWord_;
+                        else
+                            op.nextOpcode = pendingWord_;
+                        --op.fetchesLeft;
+                    }
+                    return;
+                }
+                op.phase = BitOperation::Phase::Idle;
+                continue;
+
+            case BitOperation::Phase::Idle:
+                if (op.idle)
+                {
+                    --op.idle;
+                    bus_.observe(pins_);
+                    return;
+                }
+                op.phase = BitOperation::Phase::Read;
+                continue;
+
+            case BitOperation::Phase::Read:
+                if (op.mode == 0 || (op.mode == 7 && op.reg == 4))
+                {
+                    op.value = op.mode == 0 ? state_.data[op.reg] : op.extension[firstEaExtension] & 0xff;
+                    calculate();
+                    op.phase = BitOperation::Phase::Prefetch;
+                    continue;
+                }
+                if (!op.addressReady)
+                {
+                    if (op.mode == 4)
+                        state_.address[op.reg] -= step;
+                    op.address = moveMemoryAddress(op.mode, op.reg,
+                                                   state_.address, state_.data,
+                                                   op.extension[firstEaExtension],
+                                                   op.extension[firstEaExtension + 1],
+                                                   state_.pc + 2 + firstEaExtension * 2);
+                    op.addressReady = true;
+                }
+                if (transfer(op.address, true, false, 0,
+                             op.mode == 7 && (op.reg == 2 || op.reg == 3) ? programCode : dataCode) == TransferResult::Complete)
+                {
+                    op.value = pendingByte_;
+                    if (op.mode == 3)
+                        state_.address[op.reg] += step;
+                    calculate();
+                    op.phase = BitOperation::Phase::Prefetch;
+                }
+                return;
+
+            case BitOperation::Phase::Prefetch:
+                if (transfer(state_.pc + (op.extensions + 2) * 2, false,
+                             false, 0, programCode) != TransferResult::Complete)
+                    return;
+                op.nextFollowing = pendingWord_;
+                if (op.kind != 0 && op.mode != 0)
+                    op.phase = BitOperation::Phase::Write;
+                else
+                    finish();
+                return;
+
+            case BitOperation::Phase::Write:
+                if (transfer(op.address, true, true,
+                             static_cast<std::uint16_t>(op.result), dataCode) == TransferResult::Complete)
+                    finish();
+                return;
+            }
+        }
+    }
+
+    void Moto68000::clockRegisterOperation()
+    {
+        if (registerOperation_.idle)
+        {
+            --registerOperation_.idle;
+            bus_.observe(pins_);
+            return;
+        }
+
+        const unsigned programCode = state_.sr & 0x2000 ? 6 : 2;
+        if (transfer(state_.pc + 4, false, false, 0, programCode) != TransferResult::Complete)
+            return;
+
+        const std::uint16_t opcode = state_.prefetch[0];
+        const unsigned reg = opcode & 7;
+        if ((opcode & 0xfff0) == 0x4e60)
+        {
+            if (opcode & 0x0008)
+                state_.address[reg] = usp_;
+            else
+                usp_ = state_.address[reg];
+        }
+        else if ((opcode & 0xf1f8) == 0xc140 ||
+                 (opcode & 0xf1f8) == 0xc148 ||
+                 (opcode & 0xf1f8) == 0xc188)
+        {
+            const unsigned other = (opcode >> 9) & 7;
+            const unsigned mode = (opcode >> 3) & 0x1f;
+            std::uint32_t &first = mode == 9 ? state_.address[other] : state_.data[other];
+            std::uint32_t &second = mode == 8 ? state_.data[reg] : state_.address[reg];
+            const std::uint32_t previous = first;
+            first = second;
+            second = previous;
+        }
+        else
+        {
+            const std::uint32_t value = state_.data[reg];
+            const bool swap = (opcode & 0xfff8) == 0x4840;
+            const bool word = (opcode & 0xfff8) == 0x4880;
+            const std::uint32_t result = swap ? (value << 16) | (value >> 16) : word ? (value & 0xffff0000u) | static_cast<std::uint16_t>(signedByte(value & 0xff))
+                                                                                     : static_cast<std::uint32_t>(signedWord(value & 0xffff));
+            const std::uint32_t mask = word ? 0xffffu : 0xffffffffu;
+            const std::uint32_t sign = word ? 0x8000u : 0x80000000u;
+            state_.data[reg] = result;
+            state_.sr = (state_.sr & ~std::uint16_t(0x0f)) |
+                        (result & sign ? 0x08 : 0) | ((result & mask) == 0 ? 0x04 : 0);
+        }
+        state_.prefetch = {state_.prefetch[1], pendingWord_};
+        state_.pc += 2;
+        ++state_.instructions;
+        memoryOp_ = MemoryOp::None;
+        tracePending_ = traceInstruction_;
+        traceInstruction_ = false;
+    }
+
+    void Moto68000::clockShiftRotate()
+    {
+        auto &op = shiftRotate_;
+        const unsigned programCode = state_.sr & 0x2000 ? 6 : 2;
+        const unsigned dataCode = state_.sr & 0x2000 ? 5 : 1;
+        const std::uint16_t opcode = state_.prefetch[0];
+        const unsigned kind = op.memory ? (opcode >> 9) & 3 : (opcode >> 3) & 3;
+        const bool left = (opcode & 0x0100) != 0;
+        if (!op.memory)
+        {
+            if (op.idle)
+            {
+                --op.idle;
+                bus_.observe(pins_);
+                return;
+            }
+            if (transfer(state_.pc + 4, false, false, 0, programCode) != TransferResult::Complete)
+                return;
+            const unsigned sizeCode = (opcode >> 6) & 3;
+            const unsigned bits = sizeCode == 0 ? 8 : sizeCode == 1 ? 16
+                                                                    : 32;
+            const std::uint32_t mask = bits == 32 ? 0xffffffffu : (1u << bits) - 1;
+            const unsigned reg = opcode & 7;
+            const ShiftResult result = shifted(state_.data[reg], bits,
+                                               kind, left, op.count, state_.sr);
+            state_.data[reg] = (state_.data[reg] & ~mask) | result.value;
+            state_.sr = (state_.sr & ~std::uint16_t(0x1f)) | result.flags;
+            state_.prefetch = {state_.prefetch[1], pendingWord_};
+            state_.pc += 2;
+            ++state_.instructions;
+            memoryOp_ = MemoryOp::None;
+            tracePending_ = traceInstruction_;
+            traceInstruction_ = false;
+            return;
+        }
+
+        const auto finish = [&]()
+        {
+            state_.sr = (state_.sr & ~std::uint16_t(0x1f)) | op.flags;
+            state_.prefetch = {op.nextOpcode, op.nextFollowing};
+            state_.pc += 2 + op.extensions * 2;
+            ++state_.instructions;
+            memoryOp_ = MemoryOp::None;
+            tracePending_ = traceInstruction_;
+            traceInstruction_ = false;
+        };
+        for (;;)
+        {
+            switch (op.phase)
+            {
+            case ShiftRotate::Phase::Extensions:
+                if (op.fetchesLeft)
+                {
+                    if (transfer(state_.pc + op.streamIndex * 2, false, false,
+                                 0, programCode) == TransferResult::Complete)
+                    {
+                        const unsigned index = op.streamIndex++;
+                        if (index <= op.extensions)
+                            op.extension[index - 1] = pendingWord_;
+                        else
+                            op.nextOpcode = pendingWord_;
+                        --op.fetchesLeft;
+                    }
+                    return;
+                }
+                op.phase = ShiftRotate::Phase::Idle;
+                continue;
+
+            case ShiftRotate::Phase::Idle:
+                if (op.idle)
+                {
+                    --op.idle;
+                    bus_.observe(pins_);
+                    return;
+                }
+                op.phase = ShiftRotate::Phase::Read;
+                continue;
+
+            case ShiftRotate::Phase::Read:
+                if (!op.addressReady)
+                {
+                    if (op.mode == 4)
+                        state_.address[op.reg] -= 2;
+                    op.address = moveMemoryAddress(op.mode, op.reg,
+                                                   state_.address, state_.data, op.extension[0],
+                                                   op.extension[1], state_.pc + 2);
+                    op.addressReady = true;
+                }
+                if (transfer(op.address, false, false, 0, dataCode) == TransferResult::Complete)
+                {
+                    if (op.mode == 3)
+                        state_.address[op.reg] += 2;
+                    const ShiftResult result = shifted(pendingWord_, 16,
+                                                       kind, left, 1, state_.sr);
+                    op.result = static_cast<std::uint16_t>(result.value);
+                    op.flags = result.flags;
+                    op.phase = ShiftRotate::Phase::Prefetch;
+                }
+                return;
+
+            case ShiftRotate::Phase::Prefetch:
+                if (transfer(state_.pc + (op.extensions + 2) * 2,
+                             false, false, 0, programCode) == TransferResult::Complete)
+                {
+                    op.nextFollowing = pendingWord_;
+                    op.phase = ShiftRotate::Phase::Write;
+                }
+                return;
+
+            case ShiftRotate::Phase::Write:
+                if (transfer(op.address, false, true, op.result, dataCode) == TransferResult::Complete)
+                    finish();
+                return;
+            }
+        }
+    }
+
+    void Moto68000::clockMovep()
+    {
+        auto &op = movep_;
+        const unsigned programCode = state_.sr & 0x2000 ? 6 : 2;
+        const unsigned dataCode = state_.sr & 0x2000 ? 5 : 1;
+        switch (op.phase)
+        {
+        case Movep::Phase::NextOpcode:
+            if (transfer(state_.pc + 4, false, false, 0, programCode) == TransferResult::Complete)
+            {
+                op.nextOpcode = pendingWord_;
+                op.phase = Movep::Phase::Bytes;
+            }
+            return;
+
+        case Movep::Phase::Bytes:
+        {
+            const unsigned shift = op.longSize ? 24 - op.bytesDone * 8 : 8 - op.bytesDone * 8;
+            const std::uint16_t byte = op.write ? static_cast<std::uint16_t>((state_.data[op.dataReg] >> shift) & 0xff) : 0;
+            if (transfer(op.address + op.bytesDone * 2, true, op.write,
+                         byte, dataCode) == TransferResult::Complete)
+            {
+                if (!op.write)
+                    op.value = (op.value << 8) | pendingByte_;
+                if (++op.bytesDone == (op.longSize ? 4u : 2u))
+                    op.phase = Movep::Phase::FollowingFetch;
+            }
+            return;
+        }
+
+        case Movep::Phase::FollowingFetch:
+            if (transfer(state_.pc + 6, false, false, 0, programCode) == TransferResult::Complete)
+            {
+                if (!op.write)
+                    state_.data[op.dataReg] = op.longSize ? op.value : (state_.data[op.dataReg] & 0xffff0000u) | op.value;
+                state_.prefetch = {op.nextOpcode, pendingWord_};
+                state_.pc += 4;
+                ++state_.instructions;
+                memoryOp_ = MemoryOp::None;
+                tracePending_ = traceInstruction_;
+                traceInstruction_ = false;
+            }
+            return;
+        }
+    }
+
+    void Moto68000::clockStatusMove()
+    {
+        auto &op = statusMove_;
+        const unsigned programCode = state_.sr & 0x2000 ? 6 : 2;
+        const unsigned dataCode = state_.sr & 0x2000 ? 5 : 1;
+        const auto finish = [&]()
+        {
+            if (op.fromSr && op.mode == 0)
+                state_.data[op.reg] = (state_.data[op.reg] & 0xffff0000u) |
+                                      op.value;
+            state_.prefetch = {op.nextOpcode, op.nextFollowing};
+            state_.pc += 2 + op.extensions * 2;
+            ++state_.instructions;
+            memoryOp_ = MemoryOp::None;
+            tracePending_ = traceInstruction_;
+            traceInstruction_ = false;
+        };
+
+        for (;;)
+        {
+            switch (op.phase)
+            {
+            case StatusMove::Phase::Extensions:
+                if (op.fetchesLeft)
+                {
+                    if (transfer(state_.pc + op.streamIndex * 2, false, false,
+                                 0, programCode) == TransferResult::Complete)
+                    {
+                        const unsigned index = op.streamIndex++;
+                        if (index <= op.extensions)
+                            op.extension[index - 1] = pendingWord_;
+                        else
+                            op.nextOpcode = pendingWord_;
+                        --op.fetchesLeft;
+                    }
+                    return;
+                }
+                op.phase = StatusMove::Phase::Read;
+                continue;
+
+            case StatusMove::Phase::Read:
+                if (op.fromSr && op.mode == 0)
+                {
+                    op.value = state_.sr;
+                    op.phase = StatusMove::Phase::FirstFetch;
+                    continue;
+                }
+                if (!op.fromSr &&
+                    (op.mode == 0 || (op.mode == 7 && op.reg == 4)))
+                {
+                    op.value = op.mode == 0 ? state_.data[op.reg] : op.extension[0];
+                    op.phase = StatusMove::Phase::Idle;
+                    continue;
+                }
+                if (op.addressIdle)
+                {
+                    --op.addressIdle;
+                    bus_.observe(pins_);
+                    return;
+                }
+                if (!op.addressReady)
+                {
+                    if (op.mode == 4)
+                        state_.address[op.reg] -= 2;
+                    op.address = moveMemoryAddress(op.mode, op.reg,
+                                                   state_.address, state_.data, op.extension[0],
+                                                   op.extension[1], state_.pc + 2);
+                    op.addressReady = true;
+                }
+                if (transfer(op.address, false, false, 0,
+                             !op.fromSr && op.mode == 7 &&
+                                     (op.reg == 2 || op.reg == 3)
+                                 ? programCode
+                                 : dataCode) == TransferResult::Complete)
+                {
+                    if (op.mode == 3)
+                        state_.address[op.reg] += 2;
+                    op.value = op.fromSr ? state_.sr : pendingWord_;
+                    op.phase = op.fromSr ? StatusMove::Phase::FirstFetch : StatusMove::Phase::Idle;
+                }
+                return;
+
+            case StatusMove::Phase::Idle:
+                if (op.idle)
+                {
+                    --op.idle;
+                    if (op.idle == 0 && !op.fromSr)
+                    {
+                        if (op.toSr)
+                        {
+                            const bool switchToUser = (state_.sr & 0x2000) &&
+                                                      !(op.value & 0x2000);
+                            if (switchToUser)
+                            {
+                                ssp_ = state_.address[7];
+                                state_.address[7] = usp_;
+                            }
+                            state_.sr = op.value;
+                        }
+                        else
+                            state_.sr = (state_.sr & ~std::uint16_t(0x1f)) |
+                                        (op.value & 0x1f);
+                    }
+                    bus_.observe(pins_);
+                    if (op.idle == 0 && op.fromSr)
+                        finish();
+                    return;
+                }
+                op.phase = StatusMove::Phase::FirstFetch;
+                continue;
+
+            case StatusMove::Phase::FirstFetch:
+                if (transfer(state_.pc + (op.extensions + (op.fromSr ? 2 : 1)) * 2,
+                             false, false, 0, programCode) == TransferResult::Complete)
+                {
+                    if (op.fromSr)
+                    {
+                        op.nextFollowing = pendingWord_;
+                        op.phase = op.mode == 0 ? StatusMove::Phase::Idle : StatusMove::Phase::Write;
+                    }
+                    else
+                    {
+                        op.nextOpcode = pendingWord_;
+                        op.phase = StatusMove::Phase::FollowingFetch;
+                    }
+                }
+                return;
+
+            case StatusMove::Phase::FollowingFetch:
+                if (transfer(state_.pc + (op.extensions + 2) * 2,
+                             false, false, 0, programCode) == TransferResult::Complete)
+                {
+                    op.nextFollowing = pendingWord_;
+                    finish();
+                }
+                return;
+
+            case StatusMove::Phase::Write:
+                if (transfer(op.address, false, true, op.value, dataCode) == TransferResult::Complete)
+                    finish();
+                return;
+            }
+        }
+    }
+
     void Moto68000::reset()
     {
         state_ = {};
@@ -1196,11 +2066,19 @@ namespace R2MEGA::Core
         combinedMove_ = {};
         testClearCompare_ = {};
         arithmetic_ = {};
+        multiplyDivide_ = {};
         extendedArithmetic_ = {};
+        statusImmediate_ = {};
+        bitOperation_ = {};
+        registerOperation_ = {};
+        shiftRotate_ = {};
+        movep_ = {};
+        statusMove_ = {};
         pendingByte_ = 0;
         halted_ = false;
         exceptionActive_ = false;
         exceptionLongFrame_ = false;
+        exceptionAccurateAddress_ = false;
         exceptionInstructionContext_ = false;
         interruptException_ = interruptAcknowledged_ = false;
         acknowledgedLevel_ = 0;
@@ -1264,9 +2142,44 @@ namespace R2MEGA::Core
             clockArithmetic();
             return;
         }
+        if (memoryOp_ == MemoryOp::MultiplyDivide)
+        {
+            clockMultiplyDivide();
+            return;
+        }
         if (memoryOp_ == MemoryOp::ExtendedArithmetic)
         {
             clockExtendedArithmetic();
+            return;
+        }
+        if (memoryOp_ == MemoryOp::StatusImmediate)
+        {
+            clockStatusImmediate();
+            return;
+        }
+        if (memoryOp_ == MemoryOp::BitOperation)
+        {
+            clockBitOperation();
+            return;
+        }
+        if (memoryOp_ == MemoryOp::RegisterOperation)
+        {
+            clockRegisterOperation();
+            return;
+        }
+        if (memoryOp_ == MemoryOp::ShiftRotate)
+        {
+            clockShiftRotate();
+            return;
+        }
+        if (memoryOp_ == MemoryOp::Movep)
+        {
+            clockMovep();
+            return;
+        }
+        if (memoryOp_ == MemoryOp::StatusMove)
+        {
+            clockStatusMove();
             return;
         }
         // Os 16 ciclos iniciais completam os 40 ciclos totais com seis leituras de quatro ciclos.
@@ -1452,6 +2365,38 @@ namespace R2MEGA::Core
                 clockArithmetic();
                 return;
             }
+            else if ((opcode & 0xf1c0) == 0xc0c0 ||
+                     (opcode & 0xf1c0) == 0xc1c0 ||
+                     (opcode & 0xf1c0) == 0x80c0 ||
+                     (opcode & 0xf1c0) == 0x81c0)
+            {
+                auto &op = multiplyDivide_;
+                op = {};
+                op.divide = (opcode & 0xf000) == 0x8000;
+                op.signedOperation = (opcode & 0x0100) != 0;
+                op.destination = (opcode >> 9) & 7;
+                op.mode = (opcode >> 3) & 7;
+                op.reg = opcode & 7;
+                if (op.mode == 1 || (op.mode == 7 && op.reg > 4))
+                {
+                    beginException(4, state_.pc, false);
+                    bus_.observe(pins_);
+                    return;
+                }
+                memoryOp_ = MemoryOp::MultiplyDivide;
+                op.extensions = op.mode >= 5 ? moveExtensionWords(op.mode, op.reg, 2) : 0;
+                op.fetchesLeft = op.extensions;
+                op.idle = op.mode == 4 || op.mode == 6 ||
+                                  (op.mode == 7 && op.reg == 3)
+                              ? 2
+                              : 0;
+                if (op.extensions)
+                    op.extension[0] = state_.prefetch[1];
+                else
+                    op.nextOpcode = state_.prefetch[1];
+                clockMultiplyDivide();
+                return;
+            }
             else if ((opcode & 0xf1ff) == 0x41f8)
             {
                 memoryOp_ = MemoryOp::Lea;
@@ -1553,6 +2498,41 @@ namespace R2MEGA::Core
                 clockExtendedArithmetic();
                 return;
             }
+            else if (((opcode & 0xff00) == 0x4000 ||
+                      (opcode & 0xff00) == 0x4400 ||
+                      (opcode & 0xff00) == 0x4600) &&
+                     ((opcode >> 6) & 3) != 3)
+            {
+                auto &op = arithmetic_;
+                op = {};
+                op.unary = (opcode & 0xff00) == 0x4000 ? Arithmetic::Unary::NegateExtend : (opcode & 0xff00) == 0x4400 ? Arithmetic::Unary::Negate
+                                                                                                                       : Arithmetic::Unary::Complement;
+                const unsigned sizeCode = (opcode >> 6) & 3;
+                op.size = sizeCode == 0 ? 1 : sizeCode == 1 ? 2
+                                                            : 4;
+                op.mode = (opcode >> 3) & 7;
+                op.reg = opcode & 7;
+                op.dataReg = op.reg;
+                op.memoryDestination = op.mode != 0;
+                if (op.mode == 1 || (op.mode == 7 && op.reg > 1))
+                {
+                    beginException(4, state_.pc, false);
+                    bus_.observe(pins_);
+                    return;
+                }
+                memoryOp_ = MemoryOp::Arithmetic;
+                op.extensions = op.mode >= 5 ? moveExtensionWords(op.mode, op.reg, op.size) : 0;
+                op.fetchesLeft = op.extensions;
+                op.idle = op.mode == 4 || op.mode == 6 ? 2 : 0;
+                if (op.mode == 0 && op.size == 4)
+                    op.idle += 2;
+                if (op.extensions)
+                    op.extension[0] = state_.prefetch[1];
+                else
+                    op.nextOpcode = state_.prefetch[1];
+                clockArithmetic();
+                return;
+            }
             else if ((((opcode & 0xff00) == 0x4a00 ||
                        (opcode & 0xff00) == 0x4200) &&
                       ((opcode >> 6) & 3) != 3) ||
@@ -1604,6 +2584,189 @@ namespace R2MEGA::Core
                 else
                     op.nextOpcode = state_.prefetch[1];
                 clockTestClearCompare();
+                return;
+            }
+            else if ((opcode & 0xffc0) == 0x40c0 ||
+                     (opcode & 0xffc0) == 0x44c0 ||
+                     (opcode & 0xffc0) == 0x46c0 ||
+                     (opcode & 0xffc0) == 0x42c0)
+            {
+                const unsigned family = opcode & 0xffc0;
+                const bool fromSr = family == 0x40c0;
+                const unsigned mode = (opcode >> 3) & 7;
+                const unsigned reg = opcode & 7;
+                const bool valid = family != 0x42c0 && mode != 1 &&
+                                   (mode <= 6 || (mode == 7 &&
+                                                  reg <= (fromSr ? 1u : 4u)));
+                if (!valid)
+                {
+                    beginException(4, state_.pc, false);
+                    bus_.observe(pins_);
+                    return;
+                }
+                if (family == 0x46c0 && !(state_.sr & 0x2000))
+                {
+                    beginException(8, state_.pc, false);
+                    bus_.observe(pins_);
+                    return;
+                }
+                auto &op = statusMove_;
+                op = {};
+                op.fromSr = fromSr;
+                op.toSr = family == 0x46c0;
+                op.mode = mode;
+                op.reg = reg;
+                op.extensions = mode >= 5 ? moveExtensionWords(mode, reg, 2) : 0;
+                op.fetchesLeft = op.extensions;
+                if (op.extensions)
+                    op.extension[0] = state_.prefetch[1];
+                else
+                    op.nextOpcode = state_.prefetch[1];
+                op.idle = fromSr ? (mode == 0 ? 2 : 0) : 4;
+                op.addressIdle = mode == 4 || mode == 6 ||
+                                         (mode == 7 && reg == 3)
+                                     ? 2
+                                     : 0;
+                memoryOp_ = MemoryOp::StatusMove;
+                clockStatusMove();
+                return;
+            }
+            else if ((opcode & 0xf138) == 0x0108)
+            {
+                auto &op = movep_;
+                op = {};
+                op.dataReg = (opcode >> 9) & 7;
+                op.addressReg = opcode & 7;
+                op.write = (opcode & 0x0080) != 0;
+                op.longSize = (opcode & 0x0040) != 0;
+                op.address = state_.address[op.addressReg] +
+                             signedWord(state_.prefetch[1]);
+                memoryOp_ = MemoryOp::Movep;
+                clockMovep();
+                return;
+            }
+            else if ((opcode & 0xff00) == 0x0800 ||
+                     ((opcode & 0xf100) == 0x0100 &&
+                      ((opcode >> 3) & 7) != 1))
+            {
+                auto &op = bitOperation_;
+                op = {};
+                op.staticBit = (opcode & 0x0100) == 0;
+                op.kind = (opcode >> 6) & 3;
+                op.mode = (opcode >> 3) & 7;
+                op.reg = opcode & 7;
+                op.bitReg = (opcode >> 9) & 7;
+                const bool memory = op.mode >= 2 && op.mode <= 6;
+                const bool absolute = op.mode == 7 && op.reg <= 1;
+                const bool readOnly = op.kind == 0 && op.mode == 7 &&
+                                      op.reg <= 4;
+                if (!(op.mode == 0 || memory || absolute || readOnly))
+                {
+                    beginException(4, state_.pc, false);
+                    bus_.observe(pins_);
+                    return;
+                }
+                memoryOp_ = MemoryOp::BitOperation;
+                op.extensions = (op.staticBit ? 1 : 0) +
+                                (op.mode >= 5 ? moveExtensionWords(op.mode, op.reg, 1) : 0);
+                op.fetchesLeft = op.extensions;
+                if (op.extensions)
+                    op.extension[0] = state_.prefetch[1];
+                else
+                    op.nextOpcode = state_.prefetch[1];
+                if (op.mode == 0)
+                {
+                    const unsigned bit = (op.staticBit ? op.extension[0] : state_.data[op.bitReg]) & 31u;
+                    op.idle = (op.kind == 0 ? 2 : op.kind == 2 ? 4
+                                                               : 2) +
+                              (op.kind != 0 && bit >= 16 ? 2 : 0);
+                }
+                else
+                    op.idle = op.mode == 4 || op.mode == 6 ||
+                                      (op.mode == 7 && (op.reg == 3 || op.reg == 4))
+                                  ? 2
+                                  : 0;
+                clockBitOperation();
+                return;
+            }
+            else if ((opcode & 0xfff0) == 0x4e60)
+            {
+                if (!(state_.sr & 0x2000))
+                {
+                    beginException(8, state_.pc, false);
+                    bus_.observe(pins_);
+                    return;
+                }
+                memoryOp_ = MemoryOp::RegisterOperation;
+                registerOperation_.idle = 0;
+                clockRegisterOperation();
+                return;
+            }
+            else if ((opcode & 0xfff8) == 0x4840 ||
+                     (opcode & 0xfff8) == 0x4880 ||
+                     (opcode & 0xfff8) == 0x48c0 ||
+                     (opcode & 0xf1f8) == 0xc140 ||
+                     (opcode & 0xf1f8) == 0xc148 ||
+                     (opcode & 0xf1f8) == 0xc188)
+            {
+                memoryOp_ = MemoryOp::RegisterOperation;
+                registerOperation_.idle = (opcode & 0xf000) == 0xc000 ? 2 : 0;
+                clockRegisterOperation();
+                return;
+            }
+            else if ((opcode & 0xf000) == 0xe000)
+            {
+                auto &op = shiftRotate_;
+                op = {};
+                op.memory = ((opcode >> 6) & 3) == 3;
+                if (op.memory)
+                {
+                    op.mode = (opcode >> 3) & 7;
+                    op.reg = opcode & 7;
+                    const bool valid = (opcode & 0xf8c0) == 0xe0c0 &&
+                                       ((op.mode >= 2 && op.mode <= 6) ||
+                                        (op.mode == 7 && op.reg <= 1));
+                    if (!valid)
+                    {
+                        beginException(4, state_.pc, false);
+                        bus_.observe(pins_);
+                        return;
+                    }
+                    op.extensions = op.mode >= 5 ? moveExtensionWords(op.mode, op.reg, 2) : 0;
+                    op.fetchesLeft = op.extensions;
+                    if (op.extensions)
+                        op.extension[0] = state_.prefetch[1];
+                    else
+                        op.nextOpcode = state_.prefetch[1];
+                    op.idle = op.mode == 4 || op.mode == 6 ? 2 : 0;
+                }
+                else
+                {
+                    const unsigned countField = (opcode >> 9) & 7;
+                    op.count = opcode & 0x20 ? state_.data[countField] & 63u : countField ? countField
+                                                                                          : 8u;
+                    op.idle = (((opcode >> 6) & 3) == 2 ? 4u : 2u) +
+                              2u * op.count;
+                }
+                memoryOp_ = MemoryOp::ShiftRotate;
+                clockShiftRotate();
+                return;
+            }
+            else if (opcode == 0x003c || opcode == 0x007c ||
+                     opcode == 0x023c || opcode == 0x027c ||
+                     opcode == 0x0a3c || opcode == 0x0a7c)
+            {
+                if ((opcode & 0x0040) && !(state_.sr & 0x2000))
+                {
+                    beginException(8, state_.pc, false);
+                    bus_.observe(pins_);
+                    return;
+                }
+                memoryOp_ = MemoryOp::StatusImmediate;
+                statusImmediate_ = {};
+                statusImmediate_.opcode = opcode;
+                statusImmediate_.immediate = state_.prefetch[1];
+                clockStatusImmediate();
                 return;
             }
             else if (((opcode & 0xff00) == 0x0000 ||

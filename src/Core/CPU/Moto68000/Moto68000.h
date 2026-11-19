@@ -60,7 +60,14 @@ namespace R2MEGA::Core
         void finishCombinedMove();
         void clockTestClearCompare();
         void clockArithmetic();
+        void clockMultiplyDivide();
         void clockExtendedArithmetic();
+        void clockStatusImmediate();
+        void clockBitOperation();
+        void clockRegisterOperation();
+        void clockShiftRotate();
+        void clockMovep();
+        void clockStatusMove();
         // A referência não é proprietária; o barramento deve sobreviver à CPU.
         M68KBus &bus_;
         State state_;
@@ -104,7 +111,14 @@ namespace R2MEGA::Core
             CombinedMove,
             TestClearCompare,
             Arithmetic,
-            ExtendedArithmetic
+            MultiplyDivide,
+            ExtendedArithmetic,
+            StatusImmediate,
+            BitOperation,
+            RegisterOperation,
+            ShiftRotate,
+            Movep,
+            StatusMove
         };
         MemoryOp memoryOp_ = MemoryOp::None;
         unsigned memoryStage_ = 0;
@@ -200,6 +214,13 @@ namespace R2MEGA::Core
                 Or,
                 Xor
             };
+            enum class Unary
+            {
+                None,
+                Negate,
+                NegateExtend,
+                Complement
+            };
             enum class Phase
             {
                 Extensions,
@@ -210,6 +231,7 @@ namespace R2MEGA::Core
             };
             Phase phase = Phase::Extensions;
             Logic logic = Logic::None;
+            Unary unary = Unary::None;
             bool subtract = false, addressDestination = false, memoryDestination = false;
             bool immediateInstruction = false, quickInstruction = false;
             unsigned size = 2, mode = 0, reg = 0, dataReg = 0;
@@ -222,6 +244,27 @@ namespace R2MEGA::Core
             std::uint16_t flags = 0;
             std::uint32_t address = 0, operand = 0, result = 0;
         } arithmetic_;
+        // Conserva a origem e a temporização variável das multiplicações e divisões.
+        struct MultiplyDivide
+        {
+            enum class Phase
+            {
+                Extensions,
+                AddressIdle,
+                Read,
+                Internal,
+                Prefetch
+            };
+            Phase phase = Phase::Extensions;
+            bool divide = false, signedOperation = false, overflow = false;
+            unsigned mode = 0, reg = 0, destination = 0;
+            unsigned extensions = 0, fetchesLeft = 0, streamIndex = 2;
+            unsigned idle = 0;
+            bool addressReady = false;
+            std::array<std::uint16_t, 2> extension{};
+            std::uint16_t nextOpcode = 0, nextFollowing = 0, source = 0;
+            std::uint32_t address = 0, result = 0;
+        } multiplyDivide_;
         // ADDX/SUBX e CMPM leem a origem antes do destino.
         struct ExtendedArithmetic
         {
@@ -242,10 +285,107 @@ namespace R2MEGA::Core
             std::uint32_t sourceAddress = 0, targetAddress = 0;
             std::uint32_t source = 0, target = 0, result = 0;
         } extendedArithmetic_;
+        // Mantém a operação em CCR/SR até refazer a fila de pré-busca.
+        struct StatusImmediate
+        {
+            enum class Phase
+            {
+                FirstFetch,
+                Idle,
+                OpcodeFetch,
+                FollowingFetch
+            };
+            Phase phase = Phase::FirstFetch;
+            unsigned idle = 8;
+            std::uint16_t opcode = 0, immediate = 0;
+            std::uint16_t nextOpcode = 0, nextFollowing = 0;
+        } statusImmediate_;
+        // Conserva o bit original até concluir a escrita e atualizar somente Z.
+        struct BitOperation
+        {
+            enum class Phase
+            {
+                Extensions,
+                Idle,
+                Read,
+                Prefetch,
+                Write
+            };
+            Phase phase = Phase::Extensions;
+            unsigned kind = 0, mode = 0, reg = 0, bitReg = 0;
+            unsigned extensions = 0, fetchesLeft = 0, streamIndex = 2;
+            unsigned idle = 0, bit = 0;
+            bool staticBit = false, addressReady = false, originalZero = false;
+            std::array<std::uint16_t, 3> extension{};
+            std::uint16_t nextOpcode = 0, nextFollowing = 0;
+            std::uint32_t address = 0, value = 0, result = 0;
+        } bitOperation_;
+        // A troca de registradores usa dois ciclos internos antes da pré-busca.
+        struct RegisterOperation
+        {
+            unsigned idle = 0;
+        } registerOperation_;
+        // Guarda a contagem antes da operação, inclusive quando origem e destino são o mesmo Dn.
+        struct ShiftRotate
+        {
+            enum class Phase
+            {
+                Extensions,
+                Idle,
+                Read,
+                Prefetch,
+                Write
+            };
+            Phase phase = Phase::Extensions;
+            bool memory = false, addressReady = false;
+            unsigned idle = 0, count = 0, mode = 0, reg = 0;
+            unsigned extensions = 0, fetchesLeft = 0, streamIndex = 2;
+            std::array<std::uint16_t, 2> extension{};
+            std::uint16_t nextOpcode = 0, nextFollowing = 0;
+            std::uint16_t result = 0, flags = 0;
+            std::uint32_t address = 0;
+        } shiftRotate_;
+        // MOVEP acessa bytes alternados, sempre do mais significativo ao menos significativo.
+        struct Movep
+        {
+            enum class Phase
+            {
+                NextOpcode,
+                Bytes,
+                FollowingFetch
+            };
+            Phase phase = Phase::NextOpcode;
+            bool write = false, longSize = false;
+            unsigned dataReg = 0, addressReg = 0, bytesDone = 0;
+            std::uint32_t address = 0, value = 0;
+            std::uint16_t nextOpcode = 0;
+        } movep_;
+        // Conserva a origem e refaz a pré-busca após escrever em CCR ou SR.
+        struct StatusMove
+        {
+            enum class Phase
+            {
+                Extensions,
+                Read,
+                Idle,
+                FirstFetch,
+                FollowingFetch,
+                Write
+            };
+            Phase phase = Phase::Extensions;
+            bool fromSr = false, toSr = false, addressReady = false;
+            unsigned mode = 0, reg = 0, extensions = 0;
+            unsigned fetchesLeft = 0, streamIndex = 2, idle = 0;
+            unsigned addressIdle = 0;
+            std::array<std::uint16_t, 2> extension{};
+            std::uint16_t value = 0, nextOpcode = 0, nextFollowing = 0;
+            std::uint32_t address = 0;
+        } statusMove_;
         std::uint8_t pendingByte_ = 0;
         bool halted_ = false;
         bool exceptionActive_ = false;
         bool exceptionLongFrame_ = false;
+        bool exceptionAccurateAddress_ = false;
         bool exceptionInstructionContext_ = false;
         bool interruptException_ = false;
         bool interruptAcknowledged_ = false;
