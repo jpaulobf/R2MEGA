@@ -407,11 +407,11 @@ int main()
     absoluteWriteWait.writeWait = 2;
     Moto68000 absoluteWriteWaitCpu(absoluteWriteWait);
     absoluteWriteWaitCpu.reset();
-    run(absoluteWriteWaitCpu, 40 + 4 + 12);
+    run(absoluteWriteWaitCpu, 40 + 4 + 8);
     check(absoluteWriteWaitCpu.state().pc == 0x102 &&
               absoluteWriteWaitCpu.pins().waiting && absoluteWriteWait.writes.empty(),
           "espera na escrita absoluta mantém a instrução pendente");
-    run(absoluteWriteWaitCpu, 2);
+    run(absoluteWriteWaitCpu, 2 + 4);
     check(absoluteWriteWaitCpu.state().pc == 0x106 &&
               absoluteWriteWait.writes == std::vector<std::uint32_t>{0x1100} &&
               absoluteWriteWait.byte(0x1101) == 0x7e,
