@@ -676,8 +676,8 @@ int main()
         odd.transfers.clear();
         runUntilPc(oddCpu, 0x200);
         check(oddCpu.state().instructions == 1 && oddCpu.state().address[7] == 0x17f2 &&
-                  odd.word(0x17f8) == 0x4a50 && odd.word(0x17fc) == 0x1101 &&
-                  odd.word(0x17fe) == 0x15,
+                  odd.word(0x17f8) == 0x4a50 && odd.word(0x17f6) == 0x1101 &&
+                  odd.word(0x17fe) == 0x106 && odd.word(0x17f2) == 0x4a55,
               "TST.W desalinhado gera quadro de erro de endereço");
         for (const auto &transfer : odd.transfers)
             check(transfer.second != 0x1101,

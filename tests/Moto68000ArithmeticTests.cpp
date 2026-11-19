@@ -503,8 +503,8 @@ namespace
         execute(oddCpu);
         runUntilPc(oddCpu, 0x200);
         check(oddCpu.state().instructions == 1 &&
-                  odd.word(0x17f8) == 0x9050 && odd.word(0x17fc) == 0x1101 &&
-                  odd.word(0x17fe) == 0x15,
+                  odd.word(0x17f8) == 0x9050 && odd.word(0x17f6) == 0x1101 &&
+                  odd.word(0x17fe) == 0x106 && odd.word(0x17f2) == 0x9055,
               "SUB.W desalinhado gera erro de endereço na leitura");
 
         Bus illegal;
@@ -725,8 +725,8 @@ namespace
         execute(oddCpu);
         runUntilPc(oddCpu, 0x200);
         check(oddCpu.state().instructions == 1 &&
-                  odd.word(0x17f8) == 0x0650 && odd.word(0x17fc) == 0x1101 &&
-                  odd.word(0x17fe) == 0x15,
+                  odd.word(0x17f8) == 0x0650 && odd.word(0x17f6) == 0x1101 &&
+                  odd.word(0x17fe) == 0x108 && odd.word(0x17f2) == 0x0655,
               "ADDI.W desalinhado gera erro de endereço na leitura");
 
         Bus illegal;
