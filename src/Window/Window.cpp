@@ -15,16 +15,20 @@ namespace R2MEGA::Window
     {
         SDL_Window *window = nullptr;
         SDL_Renderer *renderer = nullptr;
+        SDL_Texture *videoTexture = nullptr;
         bool sdlReady = false, contextReady = false, platformReady = false, rendererReady = false;
         bool running = true;
         bool aboutOpen = false;
         OpenHandler openHandler;
         RomProvider romProvider;
+        VideoProvider videoProvider;
+        RunningProvider runningProvider;
         RomPreview preview;
         FileManager files;
-        explicit Impl(OpenHandler handler, RomProvider provider)
-            : openHandler(std::move(handler)), romProvider(std::move(provider)), files([this](const std::filesystem::path &path)
-                                                                                       {
+        explicit Impl(OpenHandler handler, RomProvider provider, VideoProvider video, RunningProvider running)
+            : openHandler(std::move(handler)), romProvider(std::move(provider)), videoProvider(std::move(video)),
+              runningProvider(std::move(running)), files([this](const std::filesystem::path &path)
+                                                         {
                 if (!openHandler) throw std::runtime_error("ROM loading is unavailable.");
                 const auto name = openHandler(path);
                 if (romProvider)
@@ -39,6 +43,8 @@ namespace R2MEGA::Window
                 ImGui_ImplSDL3_Shutdown();
             if (contextReady)
                 ImGui::DestroyContext();
+            if (videoTexture)
+                SDL_DestroyTexture(videoTexture);
             if (renderer)
                 SDL_DestroyRenderer(renderer);
             if (window)
@@ -48,8 +54,10 @@ namespace R2MEGA::Window
         }
     };
 
-    Window::Window(OpenHandler openHandler, RomProvider romProvider)
-        : impl_(std::make_unique<Impl>(std::move(openHandler), std::move(romProvider))) {}
+    Window::Window(OpenHandler openHandler, RomProvider romProvider, VideoProvider videoProvider,
+                   RunningProvider runningProvider)
+        : impl_(std::make_unique<Impl>(std::move(openHandler), std::move(romProvider),
+                                       std::move(videoProvider), std::move(runningProvider))) {}
     Window::~Window() = default;
 
     void Window::open()
@@ -67,6 +75,14 @@ namespace R2MEGA::Window
         s.renderer = SDL_CreateRenderer(s.window, nullptr);
         if (!s.renderer)
             throw std::runtime_error(SDL_GetError());
+        if (s.videoProvider)
+        {
+            s.videoTexture = SDL_CreateTexture(s.renderer, SDL_PIXELFORMAT_ARGB8888,
+                                               SDL_TEXTUREACCESS_STREAMING, 256, 224);
+            if (!s.videoTexture)
+                throw std::runtime_error(SDL_GetError());
+            SDL_SetTextureScaleMode(s.videoTexture, SDL_SCALEMODE_NEAREST);
+        }
         if (!SDL_SetRenderVSync(s.renderer, 1))
             throw std::runtime_error(SDL_GetError());
         IMGUI_CHECKVERSION();
@@ -137,6 +153,21 @@ namespace R2MEGA::Window
         if (s.romProvider)
             if (const auto *rom = s.romProvider())
                 s.preview.draw(*rom);
+        if (s.videoTexture && s.videoProvider)
+            if (const auto *pixels = s.videoProvider())
+            {
+                if (!SDL_UpdateTexture(s.videoTexture, nullptr, pixels, 256 * sizeof(std::uint32_t)))
+                    throw std::runtime_error(SDL_GetError());
+                ImGui::SetNextWindowSize(ImVec2(540, 500), ImGuiCond_FirstUseEver);
+                if (ImGui::Begin("Saída da VDP"))
+                {
+                    ImGui::TextUnformatted("Quadro parcial: cor de fundo em H32.");
+                    if (s.runningProvider && !s.runningProvider())
+                        ImGui::TextUnformatted("Emulação pausada: falta implementar uma instrução ou dispositivo.");
+                    ImGui::Image(reinterpret_cast<ImTextureID>(s.videoTexture), ImVec2(512, 448));
+                }
+                ImGui::End();
+            }
         if (openAbout)
         {
             s.aboutOpen = true;
