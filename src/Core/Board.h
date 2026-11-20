@@ -9,13 +9,14 @@
 #include "Core/Cartridge/Cartridge.h"
 #include "Core/IO/ControllerPorts.h"
 #include "Core/Memory/WorkRAM.h"
+#include "Core/Memory/AudioRAM.h"
 #include "Core/VDP/VDP.h"
 #include "Core/Scheduler/Scheduler.h"
 
 namespace R2MEGA::Core
 {
-    // Possui os componentes e coordenará todos em uma base de tempo comum.
-    // O mapa inicial cobre ROM e Work RAM; periféricos, arbitragem e DMA virão depois.
+    // Possui os componentes e os coordena em uma base de tempo comum.
+    // O mapa atual cobre ROM, Work RAM, portas de controle e dados do VDP.
     class Board final : public M68KBus, public Z80Bus, private SchedulerTarget
     {
     public:
@@ -26,15 +27,17 @@ namespace R2MEGA::Core
         // Instala o cartucho e inicia a leitura dos vetores de reset do 68000.
         void insertCartridge(Cartridge cartridge);
         const Moto68000 &m68k() const { return cpu_; }
+        const VDP &vdp() const { return vdp_; }
+        const Z80 &z80() const { return z80_; }
         // Permite que os componentes da placa apresentem um nível IPL ao 68000.
         void setM68KInterruptLevel(unsigned level);
 
-        // Avança um ciclo mestre; a CPU ainda não executa instruções.
+        // Avança um ciclo mestre de todos os componentes conectados ao scheduler.
         using Z80Bus::clock;
         void clock();
         std::uint64_t masterCycles() const { return scheduler_.masterCycles(); }
 
-        // Mapeamento inicial do 68000: ROM do cartucho e Work RAM.
+        // Acessos do 68000 aos dispositivos atualmente ligados ao barramento.
         std::uint8_t readByte(std::uint32_t address) override;
         std::uint16_t readWord(std::uint32_t address) override;
         void writeByte(std::uint32_t address, std::uint8_t value) override;
@@ -48,15 +51,21 @@ namespace R2MEGA::Core
         void clockVDP() override;
         void clockM68K() override;
         void clockZ80() override;
+        bool z80BusGranted() const;
+        void setZ80BusRequest(bool requested);
+        void setZ80Reset(bool asserted);
 
         Moto68000 cpu_;
         Z80 z80_;
         Cartridge cartridge_;
         WorkRAM workRam_;
+        AudioRAM audioRam_;
         VDP vdp_;
         YM2612 ym2612_;
         SN76489 sn76489_;
         ControllerPorts controllers_;
         Scheduler scheduler_;
+        bool z80BusRequested_ = false;
+        bool z80ResetAsserted_ = true;
     };
 }
