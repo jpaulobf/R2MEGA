@@ -36,6 +36,27 @@ int main(int argc, char **argv)
     require(board.masterCycles() == 0 && !board.m68k().resetVectorsLoaded());
     require(board.readByte(0) == 0 && board.readWord(0) == 0x00ff);
     require(board.readWord(2) == 0xff00);
+    require(board.readWord(0xa10000) == 0x00a0);
+    require(board.readWord(0xc00004) == 0x0208);
+    require(board.readWord(0xc00006) == 0x0208);
+    require(board.readByte(0xc00004) == 0x02 && board.readByte(0xc00005) == 8);
+    board.writeWord(0xc00004, 0x8f02); // Incremento automático de dois bytes.
+    board.writeWord(0xc00004, 0xc000); // Endereço zero da CRAM.
+    board.writeWord(0xc00006, 0x0000);
+    board.writeWord(0xc00000, 0x00e0);
+    require(board.vdp().cramWord(0) == 0x00e0);
+    board.writeWord(0xc00004, 0x0000); // Leitura da VRAM.
+    board.writeWord(0xc00004, 0x0000);
+    require(board.readWord(0xc00002) == 0);
+    require(board.readWord(0xa10008) == 0 && board.readWord(0xa1000c) == 0);
+    require(board.readByte(0xa10003) == 0x7f);
+    board.writeWord(0xa10008, 0x0040); // TH da porta 1 como saída.
+    board.writeByte(0xa10003, 0);
+    require(board.readWord(0xa10008) == 0x0040 && board.readByte(0xa10003) == 0x3f);
+    board.writeByte(0xa10008, 0xff); // Byte alto da palavra não altera o registrador.
+    require(board.readWord(0xa10008) == 0x0040);
+    board.writeWord(0xa10008, 0); // Devolve TH ao estado de entrada.
+    require(board.readByte(0xa10003) == 0x7f);
     for (unsigned i = 0; i < 279; ++i)
         board.clock();
     require(board.m68k().resetVectorsLoaded() && !board.m68k().resetComplete() && board.m68k().state().cycles == 39);
@@ -45,7 +66,8 @@ int main(int argc, char **argv)
     require(board.m68k().state().pc == 8);
 
     require(board.m68k().state().prefetch[0] == 0x4e71);
-    for (unsigned i = 0; i < 28; ++i) board.clock();
+    for (unsigned i = 0; i < 28; ++i)
+        board.clock();
     require(board.m68k().state().pc == 10 && board.m68k().state().instructions == 1);
 
     board.writeWord(0xff0000, 0x1234);
@@ -54,12 +76,24 @@ int main(int argc, char **argv)
     board.writeByte(0xffffff, 0x56);
     require(board.readByte(0xefffff) == 0x56);
     bool rejected = false;
-    try { board.readWord(0xff0001); }
-    catch (const std::invalid_argument &) { rejected = true; }
+    try
+    {
+        board.readWord(0xff0001);
+    }
+    catch (const std::invalid_argument &)
+    {
+        rejected = true;
+    }
     require(rejected);
     rejected = false;
-    try { board.readByte(0x400000); }
-    catch (const std::logic_error &) { rejected = true; }
+    try
+    {
+        board.readByte(0x400000);
+    }
+    catch (const std::logic_error &)
+    {
+        rejected = true;
+    }
     require(rejected);
 
     const auto memoryPath = directory / "board-memory.bin";
@@ -108,12 +142,18 @@ int main(int argc, char **argv)
         interruptRom[address] = static_cast<unsigned char>(value >> 8);
         interruptRom[address + 1] = static_cast<unsigned char>(value);
     };
-    putWord(0, 0x00ff); putWord(2, 0xff00); // SSP na Work RAM.
-    putWord(4, 0); putWord(6, 8); // PC inicial.
-    putWord(8, 0x4e73); putWord(10, 0x4e71); // RTE prepara SR com máscara zero.
-    putWord(0x20, 0x4e71); putWord(0x22, 0x4e71);
-    putWord(0x24, 0x4e71); putWord(0x30, 0x4e73); // Tratador: RTE.
-    putWord(28 * 4, 0); putWord(28 * 4 + 2, 0x30); // Autovetor de nível 4.
+    putWord(0, 0x00ff);
+    putWord(2, 0xff00); // SSP na Work RAM.
+    putWord(4, 0);
+    putWord(6, 8); // PC inicial.
+    putWord(8, 0x4e73);
+    putWord(10, 0x4e71); // RTE prepara SR com máscara zero.
+    putWord(0x20, 0x4e71);
+    putWord(0x22, 0x4e71);
+    putWord(0x24, 0x4e71);
+    putWord(0x30, 0x4e73); // Tratador: RTE.
+    putWord(28 * 4, 0);
+    putWord(28 * 4 + 2, 0x30); // Autovetor de nível 4.
     {
         std::ofstream file(interruptPath, std::ios::binary);
         file.write(reinterpret_cast<const char *>(interruptRom.data()), interruptRom.size());
@@ -124,17 +164,110 @@ int main(int argc, char **argv)
     interruptBoard.writeWord(0xffff00, 0x2000);
     interruptBoard.writeWord(0xffff02, 0);
     interruptBoard.writeWord(0xffff04, 0x20);
-    for (unsigned i = 0; i < 60 * 7; ++i) interruptBoard.clock();
+    for (unsigned i = 0; i < 60 * 7; ++i)
+        interruptBoard.clock();
     require(interruptBoard.m68k().state().pc == 0x20);
     interruptBoard.setM68KInterruptLevel(4);
-    for (unsigned i = 0; i < 44 * 7; ++i) interruptBoard.clock();
+    for (unsigned i = 0; i < 44 * 7; ++i)
+        interruptBoard.clock();
     require(interruptBoard.m68k().state().pc == 0x30 &&
             interruptBoard.m68k().state().sr == 0x2400);
     require(interruptBoard.readWord(0xffff00) == 0x2000 &&
             interruptBoard.readWord(0xffff04) == 0x20);
     interruptBoard.setM68KInterruptLevel(0);
-    for (unsigned i = 0; i < 20 * 7; ++i) interruptBoard.clock();
+    for (unsigned i = 0; i < 20 * 7; ++i)
+        interruptBoard.clock();
     require(interruptBoard.m68k().state().pc == 0x20 &&
             interruptBoard.m68k().state().sr == 0x2000);
+
+    const auto dmaPath = directory / "board-dma.bin";
+    std::vector<unsigned char> dmaRom(0x100);
+    dmaRom[3] = 0x80;
+    dmaRom[7] = 8;
+    dmaRom[8] = 0x60;
+    dmaRom[9] = 0xfe; // BRA para si mesmo.
+    dmaRom[0x40] = 0x12;
+    dmaRom[0x41] = 0x34;
+    dmaRom[0x42] = 0x56;
+    dmaRom[0x43] = 0x78;
+    dmaRom[0x44] = 0x00;
+    dmaRom[0x45] = 0x0e; // Vermelho na entrada zero da CRAM.
+    dmaRom[0x46] = 0x00;
+    dmaRom[0x47] = 0xe0; // Verde.
+    dmaRom[0x48] = 0x0e;
+    dmaRom[0x49] = 0x00; // Azul.
+    {
+        std::ofstream file(dmaPath, std::ios::binary);
+        file.write(reinterpret_cast<const char *>(dmaRom.data()), dmaRom.size());
+        require(bool(file));
+    }
+    Board dmaBoard;
+    dmaBoard.insertCartridge(Cartridge::load(dmaPath));
+    dmaBoard.writeWord(0xc00004, 0x8110); // Habilita DMA.
+    dmaBoard.writeWord(0xc00004, 0x8f02); // Incremento de dois bytes.
+    dmaBoard.writeWord(0xc00004, 0x9302); // Duas palavras.
+    dmaBoard.writeWord(0xc00004, 0x9400);
+    dmaBoard.writeWord(0xc00004, 0x9520); // Origem: $000040.
+    dmaBoard.writeWord(0xc00004, 0x9600);
+    dmaBoard.writeWord(0xc00004, 0x9700);
+    dmaBoard.writeWord(0xc00004, 0x4000); // Destino: VRAM $0000.
+    dmaBoard.writeWord(0xc00006, 0x0080);
+    require(dmaBoard.vdp().dmaBlocksM68K());
+    for (unsigned i = 0; i < 100 && dmaBoard.vdp().dmaActive(); ++i)
+    {
+        const auto cpuCycles = dmaBoard.m68k().state().cycles;
+        dmaBoard.clock();
+        if (dmaBoard.vdp().dmaActive())
+            require(dmaBoard.m68k().state().cycles == cpuCycles);
+    }
+    require(!dmaBoard.vdp().dmaActive());
+    require(dmaBoard.vdp().vramByte(0) == 0x12 && dmaBoard.vdp().vramByte(1) == 0x34);
+    require(dmaBoard.vdp().vramByte(2) == 0x56 && dmaBoard.vdp().vramByte(3) == 0x78);
+    dmaBoard.writeWord(0xc00004, 0x8150); // DMA e exibição habilitadas.
+    dmaBoard.writeWord(0xc00004, 0x9301);
+    dmaBoard.writeWord(0xc00004, 0x9400);
+    dmaBoard.writeWord(0xc00004, 0x9522); // Origem: cor em $000044.
+    dmaBoard.writeWord(0xc00004, 0x9600);
+    dmaBoard.writeWord(0xc00004, 0x9700);
+    dmaBoard.writeWord(0xc00004, 0xc000); // Destino: CRAM, entrada zero.
+    dmaBoard.writeWord(0xc00006, 0x0080);
+    while (dmaBoard.vdp().frame() == 0)
+        dmaBoard.clock();
+    require(dmaBoard.vdp().cramWord(0) == 0x000e);
+    require(dmaBoard.vdp().pixels().front() == 0xfffc0000);
+    require(dmaBoard.vdp().pixels().back() == 0xfffc0000);
+    const auto dmaColor = [&](std::uint8_t sourceWord)
+    {
+        dmaBoard.writeWord(0xc00004, 0x9301);
+        dmaBoard.writeWord(0xc00004, 0x9400);
+        dmaBoard.writeWord(0xc00004, 0x9500 | sourceWord);
+        dmaBoard.writeWord(0xc00004, 0x9600);
+        dmaBoard.writeWord(0xc00004, 0x9700);
+        dmaBoard.writeWord(0xc00004, 0xc000);
+        dmaBoard.writeWord(0xc00006, 0x0080);
+    };
+    while (dmaBoard.vdp().line() < 74)
+        dmaBoard.clock();
+    dmaColor(0x23); // Verde a partir da linha 74.
+    while (dmaBoard.vdp().line() < 148)
+        dmaBoard.clock();
+    dmaColor(0x24); // Azul a partir da linha 148.
+    while (dmaBoard.vdp().frame() == 1)
+        dmaBoard.clock();
+    require(dmaBoard.vdp().pixels()[0] == 0xfffc0000);
+    require(dmaBoard.vdp().pixels()[100 * VDP::width] == 0xff00fc00);
+    require(dmaBoard.vdp().pixels()[200 * VDP::width] == 0xff0000fc);
+    const auto framePath = directory / "vdp-dma-frame.ppm";
+    {
+        std::ofstream frame(framePath, std::ios::binary);
+        frame << "P6\n"
+              << VDP::width << ' ' << VDP::height << "\n255\n";
+        for (const auto pixel : dmaBoard.vdp().pixels())
+        {
+            const char rgb[3]{char(pixel >> 16), char(pixel >> 8), char(pixel)};
+            frame.write(rgb, 3);
+        }
+        require(bool(frame));
+    }
     return 0;
 }

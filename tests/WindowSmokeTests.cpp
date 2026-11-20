@@ -4,6 +4,7 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <filesystem>
+#include <array>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -139,6 +140,18 @@ namespace
         require(!window.processEvents(), "Exit must stop the window");
     }
 
+    void testVideoOutput()
+    {
+        std::array<std::uint32_t, 256 * 224> pixels{};
+        pixels.fill(0xff123456);
+        R2MEGA::Window::Window window({}, {}, [&]()
+                                      { return pixels.data(); });
+        window.open();
+        window.render();
+        auto *video = ImGui::FindWindowByName("Saída da VDP");
+        require(video && video->Active, "VDP video window must be visible");
+    }
+
     void testShortcutAndClose()
     {
         R2MEGA::Window::Window window;
@@ -184,6 +197,7 @@ int main()
         testShortcutAndClose();
         testAbout();
         testRomSelection();
+        testVideoOutput();
         testPreviewDecoder();
     }
     catch (const std::exception &error)

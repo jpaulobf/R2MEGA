@@ -219,7 +219,8 @@ namespace
             expected.emplace_back('R', 0x10e);
             if (test.target)
                 for (unsigned i = 0; i < (test.size == 4 ? 2u : 1u); ++i)
-                    expected.emplace_back(test.size == 1 ? 'w' : 'W', 0x1100 + i * 2);
+                    expected.emplace_back(test.size == 1 ? 'w' : 'W',
+                                          0x1100 + (test.size == 4 ? 1 - i : i) * 2);
             check(bus.transfers == expected, label + ": ordem do barramento");
         }
     }

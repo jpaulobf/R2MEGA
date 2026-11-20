@@ -274,7 +274,7 @@ namespace
                     expectedTransfers.emplace_back('R', 0x10e + extensions * 2);
                     for (unsigned i = 0; i < (size == 4 ? 2u : 1u); ++i)
                         expectedTransfers.emplace_back(size == 1 ? 'w' : 'W',
-                                                       0x1100 + i * 2);
+                                                       0x1100 + (size == 4 ? 1 - i : i) * 2);
                     check(bus.transfers == expectedTransfers,
                           label + ": ordem do barramento");
                 }

@@ -119,6 +119,23 @@ namespace
 
 int main()
 {
+    for (const std::uint16_t displacement : {std::uint16_t(0x0010), std::uint16_t(0xfff0)})
+    {
+        Bus relative;
+        setup(relative);
+        relative.putWord(0x100, 0x4bfa); // LEA (d16,PC),A5.
+        relative.putWord(0x102, displacement);
+        Moto68000 cpu(relative);
+        cpu.reset();
+        run(cpu, 40);
+        relative.reads.clear();
+        run(cpu, 8);
+        check(cpu.state().address[5] == (displacement == 0x0010 ? 0x112u : 0xf2u) &&
+                  cpu.state().pc == 0x104 && cpu.state().sr == 0x2700 &&
+                  relative.reads == std::vector<std::uint32_t>({0x104, 0x106}),
+              "LEA relativo ao PC calcula o endereço sem ler o operando em oito ciclos");
+    }
+
     Bus postByte;
     setup(postByte);
     postByte.putWord(0x100, 0x41f8);

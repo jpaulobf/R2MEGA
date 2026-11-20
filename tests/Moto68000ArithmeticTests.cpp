@@ -291,9 +291,9 @@ namespace
                         expected.emplace_back('R', 0x10a + extensions * 2);
                         if (memoryDestination)
                         {
-                            expected.emplace_back(size == 1 ? 'w' : 'W', target);
                             if (size == 4)
                                 expected.emplace_back('W', target + 2);
+                            expected.emplace_back(size == 1 ? 'w' : 'W', target);
                         }
                         check(bus.transfers == expected, label + ": ordem do barramento");
                     }
@@ -490,7 +490,7 @@ namespace
         wait.writeWait = 3;
         check(execute(cpu) == 25 && wait.word(0x1100) == 0 &&
                   wait.word(0x1102) == 2 && cpu.state().data[0] == 1 &&
-                  wait.transfers == std::vector<std::pair<char, std::uint32_t>>({{'R', 0x1100}, {'R', 0x1102}, {'R', 0x10a}, {'W', 0x1100}, {'W', 0x1102}}),
+                  wait.transfers == std::vector<std::pair<char, std::uint32_t>>({{'R', 0x1100}, {'R', 0x1102}, {'R', 0x10a}, {'W', 0x1102}, {'W', 0x1100}}),
               "ADD.L aguarda leitura e escrita sem repetir transferências");
 
         Bus odd;
@@ -647,9 +647,9 @@ namespace
                     expected.emplace_back('R', 0x10a + extensions * 2);
                     if (ea.mode != 0)
                     {
-                        expected.emplace_back(size == 1 ? 'w' : 'W', target);
                         if (size == 4)
                             expected.emplace_back('W', target + 2);
+                        expected.emplace_back(size == 1 ? 'w' : 'W', target);
                     }
                     check(bus.transfers == expected, label + ": ordem do barramento");
                 }
@@ -711,7 +711,7 @@ namespace
         check(execute(longCpu) == 33 && longWait.word(0x1100) == 0 &&
                   longWait.word(0x1102) == 0 &&
                   (longCpu.state().sr & 0x1f) == 4 &&
-                  longWait.transfers == std::vector<std::pair<char, std::uint32_t>>({{'R', 0x108}, {'R', 0x10a}, {'R', 0x1100}, {'R', 0x1102}, {'R', 0x10c}, {'W', 0x1100}, {'W', 0x1102}}),
+                  longWait.transfers == std::vector<std::pair<char, std::uint32_t>>({{'R', 0x108}, {'R', 0x10a}, {'R', 0x1100}, {'R', 0x1102}, {'R', 0x10c}, {'W', 0x1102}, {'W', 0x1100}}),
               "SUBI.L mantém a ordem das buscas e espera nas segundas metades");
 
         Bus odd;

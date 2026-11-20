@@ -432,6 +432,46 @@ namespace
                   fault.word(0x17f8) == 0xb388 && fault.word(0x17fc) == 0x1202,
               "CMPM.L com falha na segunda leitura mantém o destino pendente");
 
+        // A origem de CMPM avança antes da falha; o destino avança após a leitura.
+        for (const bool oddSource : {true, false})
+        {
+            Bus odd;
+            odd.setup();
+            odd.putWord(0x100, 0x41f8);
+            odd.putWord(0x102, oddSource ? 0x1101 : 0x1100);
+            odd.putWord(0x104, 0x43f8);
+            odd.putWord(0x106, oddSource ? 0x1200 : 0x1201);
+            odd.putWord(0x108, 0xb348); // CMPM.W (A0)+,(A1)+.
+            Moto68000 cpu(odd);
+            boot(cpu);
+            execute(cpu);
+            execute(cpu);
+            runUntilPc(cpu, 0x200);
+            check(cpu.state().address[0] == (oddSource ? 0x1103u : 0x1102u) &&
+                      cpu.state().address[1] == (oddSource ? 0x1200u : 0x1201u) &&
+                      odd.word(0x17fe) == 0x10c && odd.word(0x17f8) == 0xb348 &&
+                      odd.word(0x17f6) == (oddSource ? 0x1101 : 0x1201) &&
+                      odd.word(0x17f2) == 0xb355,
+                  "CMPM.W com endereço ímpar salvou estado incorreto");
+        }
+
+        Bus oddImmediate;
+        oddImmediate.setup();
+        oddImmediate.putWord(0x100, 0x41f8);
+        oddImmediate.putWord(0x102, 0x1105);
+        oddImmediate.putWord(0x104, 0x0ca0); // CMPI.L #1,-(A0).
+        oddImmediate.putWord(0x106, 0);
+        oddImmediate.putWord(0x108, 1);
+        Moto68000 oddImmediateCpu(oddImmediate);
+        boot(oddImmediateCpu);
+        execute(oddImmediateCpu);
+        runUntilPc(oddImmediateCpu, 0x200);
+        check(oddImmediateCpu.state().address[0] == 0x1101 &&
+                  oddImmediate.word(0x17fe) == 0x10a &&
+                  oddImmediate.word(0x17f8) == 0x0ca0 &&
+                  oddImmediate.word(0x17f6) == 0x1101,
+              "CMPI.L desalinhado salvou PC ou endereço incorreto");
+
         Bus illegal;
         illegal.setup();
         illegal.putWord(0x100, 0xb1c8); // Campo de tamanho reservado para CMPM.
