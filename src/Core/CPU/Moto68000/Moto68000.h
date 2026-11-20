@@ -67,6 +67,7 @@ namespace R2MEGA::Core
         void clockRegisterOperation();
         void clockShiftRotate();
         void clockMovep();
+        void clockMovem();
         void clockStatusMove();
         // A referência não é proprietária; o barramento deve sobreviver à CPU.
         M68KBus &bus_;
@@ -84,6 +85,7 @@ namespace R2MEGA::Core
         unsigned branchReadsNeeded_ = 2;
         unsigned branchIdleNeeded_ = 2;
         bool branchTaken_ = true;
+        bool branchDbccExpired_ = false;
         bool quickLongActive_ = false;
         unsigned quickIdle_ = 0;
         enum class ControlOp
@@ -118,6 +120,7 @@ namespace R2MEGA::Core
             RegisterOperation,
             ShiftRotate,
             Movep,
+            Movem,
             StatusMove
         };
         MemoryOp memoryOp_ = MemoryOp::None;
@@ -233,7 +236,7 @@ namespace R2MEGA::Core
             Logic logic = Logic::None;
             Unary unary = Unary::None;
             bool subtract = false, addressDestination = false, memoryDestination = false;
-            bool immediateInstruction = false, quickInstruction = false;
+            bool immediateInstruction = false, quickInstruction = false, compareOnly = false;
             unsigned size = 2, mode = 0, reg = 0, dataReg = 0;
             unsigned quickCount = 0;
             unsigned extensions = 0, immediateWords = 0, fetchesLeft = 0, streamIndex = 2;
@@ -360,6 +363,27 @@ namespace R2MEGA::Core
             std::uint32_t address = 0, value = 0;
             std::uint16_t nextOpcode = 0;
         } movep_;
+        // MOVEM conserva a máscara e a ordem dos acessos durante esperas do barramento.
+        struct Movem
+        {
+            enum class Phase
+            {
+                Extensions,
+                NextOpcode,
+                Idle,
+                Read,
+                Write,
+                TrailingRead,
+                FollowingFetch
+            };
+            Phase phase = Phase::Extensions;
+            unsigned mode = 0, reg = 0, size = 2, extensions = 0;
+            unsigned extensionReads = 0, idle = 0;
+            unsigned registerIndex = 0, word = 0;
+            bool write = false, writeAddressReady = false;
+            std::uint16_t mask = 0, extension[2]{}, nextOpcode = 0;
+            std::uint32_t address = 0, value = 0, baseValue = 0;
+        } movem_;
         // Conserva a origem e refaz a pré-busca após escrever em CCR ou SR.
         struct StatusMove
         {
