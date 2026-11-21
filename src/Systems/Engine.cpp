@@ -34,6 +34,7 @@ namespace R2MEGA::Systems
                 Window::Window::VideoStatus status;
                 status.frame = board.vdp().frame();
                 status.pc = board.m68k().state().pc;
+                status.width = board.vdp().visibleWidth();
                 status.displayEnabled = (board.vdp().registerValue(1) & 0x40) != 0;
                 status.error = lastError;
                 return status; });
