@@ -33,7 +33,8 @@ int main(int argc, char **argv)
         require(bool(file));
     }
 
-    Board board;
+    auto boardStorage = std::make_unique<Board>();
+    Board &board = *boardStorage;
     require(board.masterCycles() == 0 && !board.m68k().resetVectorsLoaded());
     for (unsigned i = 0; i < 14; ++i)
         board.clock();
@@ -126,7 +127,8 @@ int main(int argc, char **argv)
         file.write(reinterpret_cast<const char *>(memoryRom.data()), memoryRom.size());
         require(bool(file));
     }
-    Board memoryBoard;
+    auto memoryBoardStorage = std::make_unique<Board>();
+    Board &memoryBoard = *memoryBoardStorage;
     memoryBoard.insertCartridge(Cartridge::load(memoryPath));
     for (unsigned i = 0; i < 68 * 7; ++i)
         memoryBoard.clock();
@@ -145,7 +147,8 @@ int main(int argc, char **argv)
         file.write(reinterpret_cast<const char *>(longRom.data()), longRom.size());
         require(bool(file));
     }
-    Board longBoard;
+    auto longBoardStorage = std::make_unique<Board>();
+    Board &longBoard = *longBoardStorage;
     longBoard.insertCartridge(Cartridge::load(longPath));
     for (unsigned i = 0; i < 84 * 7; ++i)
         longBoard.clock();
@@ -176,7 +179,8 @@ int main(int argc, char **argv)
         file.write(reinterpret_cast<const char *>(interruptRom.data()), interruptRom.size());
         require(bool(file));
     }
-    Board interruptBoard;
+    auto interruptBoardStorage = std::make_unique<Board>();
+    Board &interruptBoard = *interruptBoardStorage;
     interruptBoard.insertCartridge(Cartridge::load(interruptPath));
     interruptBoard.writeWord(0xffff00, 0x2000);
     interruptBoard.writeWord(0xffff02, 0);
@@ -250,7 +254,8 @@ int main(int argc, char **argv)
         file.write(reinterpret_cast<const char *>(dmaRom.data()), dmaRom.size());
         require(bool(file));
     }
-    Board dmaBoard;
+    auto dmaBoardStorage = std::make_unique<Board>();
+    Board &dmaBoard = *dmaBoardStorage;
     dmaBoard.insertCartridge(Cartridge::load(dmaPath));
     dmaBoard.writeWord(0xc00004, 0x8110); // Habilita DMA.
     dmaBoard.writeWord(0xc00004, 0x8f02); // Incremento de dois bytes.
@@ -288,7 +293,7 @@ int main(int argc, char **argv)
         dmaBoard.clock();
     require(dmaBoard.vdp().cramWord(0) == 0x000e);
     require(dmaBoard.vdp().pixels().front() == 0xfffc0000);
-    require(dmaBoard.vdp().pixels().back() == 0xfffc0000);
+    require(dmaBoard.vdp().pixels()[(VDP::height - 1) * VDP::width + VDP::h32Width - 1] == 0xfffc0000);
     const auto dmaColor = [&](std::uint8_t sourceWord)
     {
         dmaBoard.writeWord(0xc00004, 0x9301);

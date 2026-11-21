@@ -115,7 +115,7 @@ namespace
 
     void testVideoOutput()
     {
-        std::array<std::uint32_t, 256 * 224> pixels{};
+        std::array<std::uint32_t, 320 * 224> pixels{};
         pixels.fill(0xff123456);
         int reads = 0;
         R2MEGA::Window::Window window({}, [&]()

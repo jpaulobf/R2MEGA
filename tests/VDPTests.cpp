@@ -88,6 +88,13 @@ int main()
     for (unsigned i = 0; i <= 860; ++i)
         vdp.clock();
     require(vdp.pixels()[0] == 0xfffc0000);
+    require(vdp.visibleWidth() == 256 && vdp.pixels()[319] == 0xff000000);
+    vdp.writeControl(0x8c01); // H40: 320 pixels ativos por linha.
+    const auto wideFrame = vdp.frame();
+    while (vdp.frame() == wideFrame)
+        vdp.clock();
+    require(vdp.visibleWidth() == 320 && vdp.pixels()[319] == 0xfffc0000);
+    require(vdp.pixels()[(VDP::height - 1) * VDP::width + 319] == 0xfffc0000);
     vdp.reset();
     require(vdp.cramWord(0) == 0 && vdp.vramByte(0x1234) == 0);
 
