@@ -354,6 +354,51 @@ namespace
               "ADDX.B usa passo de dois bytes em A7");
     }
 
+    void decimalCases()
+    {
+        Bus registers;
+        registers.setup();
+        registers.putWord(0x100, 0x7099); // MOVEQ #$99,D0.
+        registers.putWord(0x102, 0x7201); // MOVEQ #1,D1.
+        registers.putWord(0x104, 0x7400); // Z = 1, sem alterar X.
+        registers.putWord(0x106, 0xc101); // ABCD D1,D0: 99 + 01 = 00 com transporte.
+        registers.putWord(0x108, 0xc101); // ABCD D1,D0: 00 + 01 + X = 02.
+        Moto68000 registerCpu(registers);
+        boot(registerCpu);
+        execute(registerCpu);
+        execute(registerCpu);
+        execute(registerCpu);
+        check(execute(registerCpu) == 6 && registerCpu.state().data[0] == 0xffffff00u &&
+                  (registerCpu.state().sr & 0x15) == 0x15,
+              "ABCD em registradores gera transporte decimal e conserva Z em zero");
+        check(execute(registerCpu) == 6 && registerCpu.state().data[0] == 0xffffff02u &&
+                  (registerCpu.state().sr & 0x15) == 0,
+              "ABCD usa X anterior e limpa Z após resultado não zero");
+
+        Bus memory;
+        memory.setup();
+        memory.putWord(0x100, 0x41f8);
+        memory.putWord(0x102, 0x1102); // A0 = $1102.
+        memory.putWord(0x104, 0x43f8);
+        memory.putWord(0x106, 0x1202); // A1 = $1202.
+        memory.putWord(0x108, 0x7400); // Z = 1.
+        memory.putWord(0x10a, 0xc308); // ABCD -(A0),-(A1).
+        memory.bytes[0x1101] = 0x45;
+        memory.bytes[0x1201] = 0x55;
+        Moto68000 memoryCpu(memory);
+        boot(memoryCpu);
+        execute(memoryCpu);
+        execute(memoryCpu);
+        execute(memoryCpu);
+        memory.transfers.clear();
+        check(execute(memoryCpu) == 18 && memoryCpu.state().address[0] == 0x1101 &&
+                  memoryCpu.state().address[1] == 0x1201 && memory.byte(0x1201) == 0 &&
+                  (memoryCpu.state().sr & 0x15) == 0x15,
+              "ABCD em memória usa pré-decremento e transporte decimal");
+        check(memory.transfers == std::vector<std::pair<char, std::uint32_t>>({{'r', 0x1101}, {'r', 0x1201}, {'R', 0x10e}, {'w', 0x1201}}),
+              "ABCD lê origem e destino antes de escrever");
+    }
+
     void waitAndFaultCases()
     {
         Bus wait;
@@ -437,6 +482,7 @@ int main()
     {
         registerCases();
         memoryCases();
+        decimalCases();
         waitAndFaultCases();
     }
     catch (const std::exception &error)
