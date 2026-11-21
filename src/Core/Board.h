@@ -16,7 +16,7 @@
 namespace R2MEGA::Core
 {
     // Possui os componentes e os coordena em uma base de tempo comum.
-    // O mapa atual cobre ROM, Work RAM, portas de controle e dados do VDP.
+    // O mapa atual cobre ROM, Work RAM, Audio RAM, controles do Z80 e portas do VDP.
     class Board final : public M68KBus, public Z80Bus, private SchedulerTarget
     {
     public:
@@ -29,6 +29,7 @@ namespace R2MEGA::Core
         const Moto68000 &m68k() const { return cpu_; }
         const VDP &vdp() const { return vdp_; }
         const Z80 &z80() const { return z80_; }
+        const SN76489 &psg() const { return sn76489_; }
         // Permite que os componentes da placa apresentem um nível IPL ao 68000.
         void setM68KInterruptLevel(unsigned level);
 
@@ -54,6 +55,7 @@ namespace R2MEGA::Core
         bool z80BusGranted() const;
         void setZ80BusRequest(bool requested);
         void setZ80Reset(bool asserted);
+        void writeZ80BankBit(std::uint8_t value);
 
         Moto68000 cpu_;
         Z80 z80_;
@@ -67,5 +69,6 @@ namespace R2MEGA::Core
         Scheduler scheduler_;
         bool z80BusRequested_ = false;
         bool z80ResetAsserted_ = true;
+        std::uint16_t z80Bank_ = 0;
     };
 }
