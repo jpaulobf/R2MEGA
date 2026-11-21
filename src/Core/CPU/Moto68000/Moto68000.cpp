@@ -1404,6 +1404,19 @@ namespace R2MEGA::Core
                                                                            : 0x80000000u;
             const std::uint32_t lhs = op.target & mask, rhs = op.source & mask;
             const std::uint32_t extend = !op.compareMemory && (state_.sr & 0x10) ? 1u : 0u;
+            if (op.decimal)
+            {
+                // Ajusta os dois dígitos decimais; Z é acumulado entre bytes.
+                const unsigned low = (lhs & 15) + (rhs & 15) + extend;
+                unsigned sum = lhs + rhs + extend + (low > 9 ? 6 : 0);
+                const bool carry = sum > 0x99;
+                if (carry)
+                    sum += 0x60;
+                op.result = sum & 0xff;
+                op.flags = (state_.sr & 0x0a) | (carry ? 0x11 : 0) |
+                           ((state_.sr & 0x04) && op.result == 0 ? 0x04 : 0);
+                return;
+            }
             op.result = op.subtract ? (lhs - rhs - extend) & mask : (lhs + rhs + extend) & mask;
             const bool carry = op.subtract ? std::uint64_t(lhs) < std::uint64_t(rhs) + extend : std::uint64_t(lhs) + rhs + extend > mask;
             const bool overflow = op.subtract ? ((lhs ^ rhs) & (lhs ^ op.result) & sign) != 0 : ((~(lhs ^ rhs)) & (lhs ^ op.result) & sign) != 0;
@@ -3169,6 +3182,21 @@ namespace R2MEGA::Core
                 if (!op.memoryDestination && op.size == 4)
                     op.idle += 4;
                 clockArithmetic();
+                return;
+            }
+            else if ((opcode & 0xf1f0) == 0xc100)
+            {
+                auto &op = extendedArithmetic_;
+                op = {};
+                op.decimal = true;
+                op.memory = (opcode & 8) != 0;
+                op.size = 1;
+                op.sourceReg = opcode & 7;
+                op.targetReg = (opcode >> 9) & 7;
+                op.idle = 2;
+                op.nextOpcode = state_.prefetch[1];
+                memoryOp_ = MemoryOp::ExtendedArithmetic;
+                clockExtendedArithmetic();
                 return;
             }
             else if (((opcode & 0xf000) == 0x8000 ||

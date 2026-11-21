@@ -275,7 +275,7 @@ namespace R2MEGA::Core
             std::uint16_t nextOpcode = 0, nextFollowing = 0, source = 0;
             std::uint32_t address = 0, result = 0;
         } multiplyDivide_;
-        // ADDX/SUBX e CMPM leem a origem antes do destino.
+        // ADDX/SUBX, ABCD e CMPM leem a origem antes do destino.
         struct ExtendedArithmetic
         {
             enum class Phase
@@ -287,7 +287,7 @@ namespace R2MEGA::Core
                 Write
             };
             Phase phase = Phase::Idle;
-            bool subtract = false, memory = false, compareMemory = false;
+            bool subtract = false, memory = false, compareMemory = false, decimal = false;
             unsigned size = 2, sourceReg = 0, targetReg = 0;
             unsigned idle = 0, sourceReads = 0, targetReads = 0, writes = 0;
             bool sourceAddressReady = false, targetAddressReady = false;
