@@ -1,4 +1,5 @@
 #include "Core/Board.h"
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -34,11 +35,31 @@ namespace R2MEGA::Core
         z80BusRequested_ = false;
         z80ResetAsserted_ = true;
         z80Bank_ = 0;
+        externalInterruptLevel_ = 0;
+        cpu_.setInterruptLevel(0);
     }
 
     void Board::clock() { scheduler_.clock(); }
-    void Board::setM68KInterruptLevel(unsigned level) { cpu_.setInterruptLevel(level); }
-    void Board::clockVDP() { vdp_.clock(); }
+    void Board::setM68KInterruptLevel(unsigned level)
+    {
+        if (level > 7)
+            throw std::invalid_argument("Nível de interrupção do 68000 fora de 0..7");
+        externalInterruptLevel_ = level;
+        cpu_.setInterruptLevel(std::max(level, vdp_.interruptLevel()));
+    }
+    void Board::clockVDP()
+    {
+        vdp_.clock();
+        cpu_.setInterruptLevel(std::max(externalInterruptLevel_, vdp_.interruptLevel()));
+    }
+
+    bool Board::tryAcknowledgeInterrupt(unsigned level, M68KInterruptResponse &response)
+    {
+        if (level == 6 && vdp_.interruptLevel() == 6)
+            vdp_.acknowledgeInterrupt(level);
+        cpu_.setInterruptLevel(std::max(externalInterruptLevel_, vdp_.interruptLevel()));
+        return M68KBus::tryAcknowledgeInterrupt(level, response);
+    }
     void Board::clockM68K()
     {
         if (!vdp_.dmaBlocksM68K())

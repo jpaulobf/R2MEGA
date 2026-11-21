@@ -41,6 +41,7 @@ namespace R2MEGA::Core
         // Acessos do 68000 aos dispositivos atualmente ligados ao barramento.
         std::uint8_t readByte(std::uint32_t address) override;
         std::uint16_t readWord(std::uint32_t address) override;
+        bool tryAcknowledgeInterrupt(unsigned level, M68KInterruptResponse &response) override;
         void writeByte(std::uint32_t address, std::uint8_t value) override;
         void writeWord(std::uint32_t address, std::uint16_t value) override;
         std::uint8_t readMemory(std::uint16_t address) const override;
@@ -70,5 +71,6 @@ namespace R2MEGA::Core
         bool z80BusRequested_ = false;
         bool z80ResetAsserted_ = true;
         std::uint16_t z80Bank_ = 0;
+        unsigned externalInterruptLevel_ = 0;
     };
 }
