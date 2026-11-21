@@ -31,7 +31,7 @@ namespace R2MEGA::Core
             (cycleInLine_ - 860) % masterCyclesPerDot == 0)
         {
             const auto x = (cycleInLine_ - 860) / masterCyclesPerDot;
-            pixels_[line_ * width + x] = backdropColor();
+            pixels_[line_ * width + x] = renderPixel(x, line_);
         }
         if (++cycleInLine_ != masterCyclesPerLine)
             return;
@@ -57,13 +57,72 @@ namespace R2MEGA::Core
         return status;
     }
 
-    std::uint32_t VDP::backdropColor() const
+    VDP::PlanePixel VDP::planePixel(unsigned plane, unsigned x, unsigned y) const
     {
-        const auto color = cram_.read(registers_[7] & 0x3f);
+        // O registrador 16 define largura e altura em blocos de oito pixels.
+        static constexpr unsigned widths[4]{32, 64, 32, 128};
+        static constexpr unsigned heights[4]{32, 64, 96, 128};
+        const unsigned cellsWide = widths[registers_[16] & 3];
+        const unsigned cellsHigh = heights[(registers_[16] >> 4) & 3];
+        // A tabela horizontal guarda duas palavras por linha: plano A, depois B.
+        static constexpr unsigned lineMasks[4]{0, 7, 0xf8, 0xff};
+        const unsigned scrollLine = y & lineMasks[registers_[11] & 3];
+        const auto scrollAddress = std::uint16_t((unsigned(registers_[13] & 0x3f) << 10) +
+                                                 4 * scrollLine + 2 * plane);
+        const auto horizontalScroll = std::uint16_t((unsigned(vram_.read(scrollAddress)) << 8) |
+                                                    vram_.read(std::uint16_t(scrollAddress + 1)));
+        const unsigned verticalIndex = (registers_[11] & 4) ? 2 * (x >> 4) + plane : plane;
+        const unsigned verticalScroll = vsram_.read(verticalIndex) & 0x3ff;
+        const unsigned sourceX = (x - horizontalScroll) & (cellsWide * 8 - 1);
+        const unsigned sourceY = (y + verticalScroll) % (cellsHigh * 8);
+        const unsigned cellX = sourceX >> 3;
+        const unsigned cellY = sourceY >> 3;
+        const unsigned base = plane == 0
+                                  ? (unsigned(registers_[2] & 0x38) << 10)
+                                  : (unsigned(registers_[4] & 7) << 13);
+        const auto entryAddress = std::uint16_t(base + 2 * (cellY * cellsWide + cellX));
+        const auto attribute = std::uint16_t((unsigned(vram_.read(entryAddress)) << 8) |
+                                             vram_.read(std::uint16_t(entryAddress + 1)));
+        const unsigned tileX = (attribute & 0x0800) ? 7 - (sourceX & 7) : sourceX & 7;
+        const unsigned tileY = (attribute & 0x1000) ? 7 - (sourceY & 7) : sourceY & 7;
+        const auto patternAddress = std::uint16_t((attribute & 0x07ff) * 32 + tileY * 4 + (tileX >> 1));
+        const auto pattern = vram_.read(patternAddress);
+        const unsigned color = (tileX & 1) ? (pattern & 15) : (pattern >> 4);
+        if (color == 0)
+            return {};
+        return {std::uint8_t(((attribute >> 9) & 0x30) | color), (attribute & 0x8000) != 0};
+    }
+
+    std::uint32_t VDP::renderPixel(unsigned x, unsigned y) const
+    {
+        if (!(registers_[1] & 0x40))
+            return backdropColor();
+        const auto a = planePixel(0, x, y);
+        const auto b = planePixel(1, x, y);
+        // Ordem do modo 5: A alta, B alta, A baixa e B baixa.
+        if (a.color && a.priority)
+            return paletteColor(a.color);
+        if (b.color && b.priority)
+            return paletteColor(b.color);
+        if (a.color)
+            return paletteColor(a.color);
+        if (b.color)
+            return paletteColor(b.color);
+        return backdropColor();
+    }
+
+    std::uint32_t VDP::paletteColor(unsigned index) const
+    {
+        const auto color = cram_.read(index);
         const auto red = ((color >> 1) & 7) * 36;
         const auto green = ((color >> 5) & 7) * 36;
         const auto blue = ((color >> 9) & 7) * 36;
         return 0xff000000u | (red << 16) | (green << 8) | blue;
+    }
+
+    std::uint32_t VDP::backdropColor() const
+    {
+        return paletteColor(registers_[7] & 0x3f);
     }
 
     void VDP::writeControl(std::uint16_t value)

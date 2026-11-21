@@ -46,12 +46,20 @@ namespace R2MEGA::Core
         const std::array<std::uint32_t, width * height> &pixels() const { return pixels_; }
 
     private:
+        struct PlanePixel
+        {
+            std::uint8_t color = 0;
+            bool priority = false;
+        };
         enum class DmaMode
         {
             Bus,
             Fill,
             Copy
         };
+        PlanePixel planePixel(unsigned plane, unsigned x, unsigned y) const;
+        std::uint32_t renderPixel(unsigned x, unsigned y) const;
+        std::uint32_t paletteColor(unsigned index) const;
         std::uint32_t backdropColor() const;
         void startDma(DmaMode mode);
         void clockDma();
