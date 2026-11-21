@@ -136,6 +136,35 @@ int main()
               "LEA relativo ao PC calcula o endereço sem ler o operando em oito ciclos");
     }
 
+    Bus absoluteLong;
+    setup(absoluteLong);
+    absoluteLong.putWord(0x100, 0x4df9); // LEA $00FEDCBA.L,A6.
+    absoluteLong.putWord(0x102, 0x00fe);
+    absoluteLong.putWord(0x104, 0xdcba);
+    Moto68000 absoluteLongCpu(absoluteLong);
+    absoluteLongCpu.reset();
+    run(absoluteLongCpu, 40);
+    absoluteLong.reads.clear();
+    run(absoluteLongCpu, 12);
+    check(absoluteLongCpu.state().address[6] == 0x00fedcbau &&
+              absoluteLongCpu.state().pc == 0x106 &&
+              absoluteLongCpu.state().prefetch[0] == 0x4e71 &&
+              absoluteLong.reads == std::vector<std::uint32_t>({0x104, 0x106, 0x108}),
+          "LEA absoluto longo calcula o endereço e avança a busca em doze ciclos");
+
+    Bus displacedLea;
+    setup(displacedLea);
+    displacedLea.putWord(0x100, 0x4df8); // LEA $0180.W,A6.
+    displacedLea.putWord(0x102, 0x0180);
+    displacedLea.putWord(0x104, 0x4bee); // LEA ($80,A6),A5.
+    displacedLea.putWord(0x106, 0x0080);
+    Moto68000 displacedLeaCpu(displacedLea);
+    displacedLeaCpu.reset();
+    run(displacedLeaCpu, 40 + 8 + 8);
+    check(displacedLeaCpu.state().address[5] == 0x200 &&
+              displacedLeaCpu.state().pc == 0x108,
+          "LEA com deslocamento de An calcula o endereço em oito ciclos");
+
     Bus postByte;
     setup(postByte);
     postByte.putWord(0x100, 0x41f8);

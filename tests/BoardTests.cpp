@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <stdexcept>
 #include <vector>
 
@@ -223,6 +224,10 @@ int main(int argc, char **argv)
     require(!dmaBoard.vdp().dmaActive());
     require(dmaBoard.vdp().vramByte(0) == 0x12 && dmaBoard.vdp().vramByte(1) == 0x34);
     require(dmaBoard.vdp().vramByte(2) == 0x56 && dmaBoard.vdp().vramByte(3) == 0x78);
+    dmaBoard.writeWord(0xc00004, 0x4000); // Limpa o padrão zero antes do teste de fundo.
+    dmaBoard.writeWord(0xc00004, 0x0000);
+    dmaBoard.writeWord(0xc00000, 0);
+    dmaBoard.writeWord(0xc00000, 0);
     dmaBoard.writeWord(0xc00004, 0x8150); // DMA e exibição habilitadas.
     dmaBoard.writeWord(0xc00004, 0x9301);
     dmaBoard.writeWord(0xc00004, 0x9400);
@@ -257,6 +262,64 @@ int main(int argc, char **argv)
     require(dmaBoard.vdp().pixels()[0] == 0xfffc0000);
     require(dmaBoard.vdp().pixels()[100 * VDP::width] == 0xff00fc00);
     require(dmaBoard.vdp().pixels()[200 * VDP::width] == 0xff0000fc);
+    auto z80Board = std::make_unique<Board>();
+    z80Board->insertCartridge(Cartridge::load(dmaPath));
+    require(z80Board->readWord(0xa11100) == 0 && z80Board->z80().state().cycles == 0);
+    z80Board->writeWord(0xa00000, 0x7600); // A palavra escreve o byte alto na RAM do Z80.
+    require(z80Board->readMemory(0) == 0x76 && z80Board->readWord(0xa00000) == 0x7676);
+    z80Board->writeByte(0xa11200, 1); // Libera RESET; o Z80 passa a executar.
+    for (unsigned i = 0; i < 15; ++i)
+        z80Board->clock();
+    require(z80Board->z80().state().cycles == 1 && z80Board->readWord(0xa11100) == 0x0100);
+    z80Board->writeWord(0xa11100, 0x0100);
+    require(z80Board->readWord(0xa11100) == 0x0100); // Ainda termina o M-cycle atual.
+    for (unsigned i = 0; i < 60; ++i)
+        z80Board->clock();
+    require(z80Board->readWord(0xa11100) == 0);
+    z80Board->writeByte(0xa00001, 0x12);
+    require(z80Board->readMemory(1) == 0x12);
+    z80Board->writeWord(0xa11100, 0);
+    require(z80Board->readWord(0xa11100) == 0x0100);
+    bool denied = false;
+    try
+    {
+        z80Board->readByte(0xa00000);
+    }
+    catch (const std::logic_error &)
+    {
+        denied = true;
+    }
+    require(denied);
+    z80Board->writeWord(0xa11200, 0); // RESET volta a dar acesso imediato ao 68000.
+    require(z80Board->readWord(0xa11100) == 0 && z80Board->z80().state().cycles == 0);
+    z80Board->writeByte(0xc00011, 0x82); // O 68000 escreve o PSG pelo byte ímpar.
+    z80Board->writeByte(0xc00013, 0x00);
+    z80Board->writeWord(0xc00010, 0x0090); // A palavra usa o byte baixo.
+    require(z80Board->psg().registerValue(0) == 2);
+    require(z80Board->psg().registerValue(1) == 0);
+    z80Board->writeMemory(0x7f11, 0x9f); // O Z80 também alcança o PSG.
+    require(z80Board->psg().registerValue(1) == 15);
+    z80Board->insertCartridge(Cartridge::load(dmaPath));
+    z80Board->writeByte(0xc00011, 0x82);
+    z80Board->writeByte(0xc00011, 0x00);
+    z80Board->writeByte(0xc00011, 0x90);
+    require(z80Board->psg().sample() < 0);
+    for (unsigned i = 0; i < 240; ++i)
+        z80Board->clock(); // O divisor mestre/15 fornece 16 entradas ao PSG.
+    require(z80Board->psg().sample() > 0);
+    require(z80Board->readMemory(0x8000) == dmaRom[0]); // Banco inicial: ROM na origem.
+    for (unsigned bit = 0; bit < 9; ++bit)
+        z80Board->writeMemory(0x6000, std::uint8_t((0x1fe >> bit) & 1));
+    z80Board->writeByte(0xff0000, 0x5a);
+    require(z80Board->readMemory(0x8000) == 0x5a); // Banco $FF0000: Work RAM.
+    z80Board->writeMemory(0x8001, 0x3c);
+    require(z80Board->readByte(0xff0001) == 0x3c);
+    z80Board->insertCartridge(Cartridge::load(dmaPath));
+    require(z80Board->readMemory(0x8000) == dmaRom[0]); // Inserir cartucho reinicia o banco.
+    for (unsigned bit = 0; bit < 9; ++bit)
+        z80Board->writeWord(0xa06000, std::uint16_t(((0x1fe >> bit) & 1) << 8));
+    z80Board->writeByte(0xff0000, 0x76);
+    require(z80Board->readMemory(0x8000) == 0x76); // O 68000 também programa o banco.
     const auto framePath = directory / "vdp-dma-frame.ppm";
     {
         std::ofstream frame(framePath, std::ios::binary);

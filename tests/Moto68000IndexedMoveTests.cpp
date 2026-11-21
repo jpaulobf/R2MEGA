@@ -101,6 +101,55 @@ namespace
 
 int main()
 {
+    Bus indexedTarget;
+    indexedTarget.setup();
+    indexedTarget.putWord(0x100, 0x43f8); // LEA $1104.W,A1.
+    indexedTarget.putWord(0x102, 0x1104);
+    indexedTarget.putWord(0x104, 0x7004); // MOVEQ #4,D0.
+    indexedTarget.putWord(0x106, 0x7e80); // MOVEQ #-128,D7.
+    indexedTarget.putWord(0x108, 0x3387); // MOVE.W D7,(-8,A1,D0.W).
+    indexedTarget.putWord(0x10a, 0x00f8);
+    Moto68000 indexedTargetCpu(indexedTarget);
+    indexedTargetCpu.reset();
+    run(indexedTargetCpu, 40 + 8 + 4 + 4 + 14);
+    check(indexedTargetCpu.state().pc == 0x10c &&
+              indexedTarget.byte(0x1100) == 0xff && indexedTarget.byte(0x1101) == 0x80 &&
+              (indexedTargetCpu.state().sr & 0x0f) == 8,
+          "MOVE.W para destino indexado grava a palavra e atualiza os sinalizadores em 14 ciclos");
+
+    Bus immediateTarget;
+    immediateTarget.setup();
+    immediateTarget.putWord(0x100, 0x43f8); // LEA $1100.W,A1.
+    immediateTarget.putWord(0x102, 0x1100);
+    immediateTarget.putWord(0x104, 0x33bc); // MOVE.W #$1234,(0,A1,D0.W).
+    immediateTarget.putWord(0x106, 0x1234);
+    immediateTarget.putWord(0x108, 0x0000);
+    Moto68000 immediateTargetCpu(immediateTarget);
+    immediateTargetCpu.reset();
+    run(immediateTargetCpu, 40 + 8 + 18);
+    check(immediateTargetCpu.state().pc == 0x10a &&
+              immediateTarget.byte(0x1100) == 0x12 && immediateTarget.byte(0x1101) == 0x34 &&
+              (immediateTargetCpu.state().sr & 0x0f) == 0,
+          "MOVE.W imediato para destino indexado consome ambas as extensões");
+
+    Bus memoryTarget;
+    memoryTarget.setup();
+    memoryTarget.putWord(0x100, 0x41f8); // LEA $1200.W,A0.
+    memoryTarget.putWord(0x102, 0x1200);
+    memoryTarget.putWord(0x104, 0x43f8); // LEA $1300.W,A1.
+    memoryTarget.putWord(0x106, 0x1300);
+    memoryTarget.putWord(0x108, 0x7004); // MOVEQ #4,D0.
+    memoryTarget.putWord(0x10a, 0x3390); // MOVE.W (A0),(-4,A1,D0.W).
+    memoryTarget.putWord(0x10c, 0x00fc);
+    memoryTarget.putWord(0x1200, 0x8001);
+    Moto68000 memoryTargetCpu(memoryTarget);
+    memoryTargetCpu.reset();
+    run(memoryTargetCpu, 40 + 8 + 8 + 4 + 18);
+    check(memoryTargetCpu.state().pc == 0x10e &&
+              memoryTarget.byte(0x1300) == 0x80 && memoryTarget.byte(0x1301) == 1 &&
+              (memoryTargetCpu.state().sr & 0x0f) == 8,
+          "MOVE.W entre memórias usa o destino indexado em 18 ciclos");
+
     Bus addressIndex;
     addressIndex.setup();
     addressIndex.putWord(0x100, 0x41f8);

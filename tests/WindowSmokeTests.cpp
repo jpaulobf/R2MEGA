@@ -1,5 +1,4 @@
 #include "Window/Window.h"
-#include "Window/RomPreview.h"
 #include <SDL3/SDL.h>
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -57,15 +56,12 @@ namespace
         try
         {
             int attempts = 0;
-            std::vector<std::uint8_t> loaded;
             R2MEGA::Window::Window window([&](const std::filesystem::path &path)
                                           {
                 ++attempts;
                 require(path.filename() == "game.bin", "Unexpected selected file");
                 if (attempts == 1) throw std::runtime_error("Test load failure");
-                loaded = {0, 0, 0, 0, 0, 0, 0, 8, 0x4e, 0x71};
-                return std::string("game.bin"); }, [&]() -> const std::vector<std::uint8_t> *
-                                          { return loaded.empty() ? nullptr : &loaded; });
+                return std::string("game.bin"); });
             window.open();
             window.processEvents();
             activateMenu(window, "Open...");
@@ -88,8 +84,6 @@ namespace
             require(attempts == 2, "Selecting a ROM must invoke the loading callback");
             window.render();
             require(!ImGui::FindWindowByName("Open ROM")->Active, "Successful loading must close the browser");
-            auto *preview = ImGui::FindWindowByName("Temporary ROM preview");
-            require(preview && preview->Active, "Loaded ROM preview must be visible");
             int count = 0;
             SDL_Window **windows = SDL_GetWindows(&count);
             require(windows && count == 1, "Expected one SDL window");
@@ -103,27 +97,6 @@ namespace
             throw;
         }
         std::filesystem::current_path(previous);
-    }
-
-    void testPreviewDecoder()
-    {
-        using R2MEGA::Window::decodePreview;
-        const std::vector<std::uint8_t> rom = {0x4e, 0x71, 0x70, 0xff, 0x60, 0xfe,
-                                               0x60, 0x00, 0xff, 0xfc,
-                                               0x4e, 0xf9, 0x00, 0x12, 0x34, 0x56,
-                                               0xab, 0xcd, 0x12};
-        require(decodePreview(rom, 0).text == "NOP", "NOP decoding");
-        require(decodePreview(rom, 2).text == "MOVEQ  #-1,D0", "MOVEQ decoding");
-        require(decodePreview(rom, 4).text == "BRA    $000004", "short branch decoding");
-        const auto branch = decodePreview(rom, 6);
-        require(branch.length == 4 && branch.text == "BRA    $000004", "word branch decoding");
-        const auto jump = decodePreview(rom, 10);
-        require(jump.length == 6 && jump.text == "JMP    $00123456", "absolute jump decoding");
-        require(decodePreview(rom, 16).text == "DC.W   $ABCD", "unknown word decoding");
-        require(decodePreview(rom, 18).text == "DC.B   $12", "trailing byte decoding");
-        require(decodePreview(rom, 19).length == 0, "end of ROM handling");
-        const std::vector<std::uint8_t> truncated = {0x60, 0x00, 0xff};
-        require(decodePreview(truncated, 0).text == "DC.W   $6000", "truncated instruction handling");
     }
 
     void testOpenAndExit()
@@ -144,12 +117,16 @@ namespace
     {
         std::array<std::uint32_t, 256 * 224> pixels{};
         pixels.fill(0xff123456);
-        R2MEGA::Window::Window window({}, {}, [&]()
-                                      { return pixels.data(); });
+        int reads = 0;
+        R2MEGA::Window::Window window({}, [&]()
+                                      {
+                                          ++reads;
+                                          return pixels.data(); });
         window.open();
         window.render();
+        require(reads == 1, "Main window must request the VDP framebuffer");
         auto *video = ImGui::FindWindowByName("Saída da VDP");
-        require(video && video->Active, "VDP video window must be visible");
+        require(!video || !video->Active, "VDP must not open a secondary window");
     }
 
     void testShortcutAndClose()
@@ -198,7 +175,6 @@ int main()
         testAbout();
         testRomSelection();
         testVideoOutput();
-        testPreviewDecoder();
     }
     catch (const std::exception &error)
     {
