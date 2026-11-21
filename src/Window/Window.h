@@ -4,7 +4,6 @@
 #include <functional>
 #include <string>
 #include <cstdint>
-#include <vector>
 
 namespace R2MEGA::Window
 {
@@ -15,14 +14,21 @@ namespace R2MEGA::Window
         // Carrega o arquivo selecionado e retorna o nome a ser exibido.
         using OpenHandler = std::function<std::string(const std::filesystem::path &)>;
 
-        // Acesso temporário para inspeção; a aplicação continua proprietária da ROM.
-        using RomProvider = std::function<const std::vector<std::uint8_t> *()>;
         // Quadro ARGB8888 de 256 x 224 pixels pertencente ao núcleo.
         using VideoProvider = std::function<const std::uint32_t *()>;
         using RunningProvider = std::function<bool()>;
+        // Dados de execução mostrados junto ao quadro da VDP.
+        struct VideoStatus
+        {
+            std::uint64_t frame = 0;
+            std::uint32_t pc = 0;
+            bool displayEnabled = false;
+            std::string error;
+        };
+        using VideoStatusProvider = std::function<VideoStatus()>;
 
-        explicit Window(OpenHandler openHandler = {}, RomProvider romProvider = {},
-                        VideoProvider videoProvider = {}, RunningProvider runningProvider = {});
+        explicit Window(OpenHandler openHandler = {}, VideoProvider videoProvider = {}, RunningProvider runningProvider = {},
+                        VideoStatusProvider videoStatusProvider = {});
 
         ~Window();
 

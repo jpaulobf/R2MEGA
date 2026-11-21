@@ -1,11 +1,11 @@
 #include "Window/Window.h"
 #include "Window/FileManager.h"
-#include "Window/RomPreview.h"
 #include <SDL3/SDL.h>
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_sdlrenderer3.h>
 #include <algorithm>
+#include <cstdio>
 #include <stdexcept>
 #include <utility>
 
@@ -20,19 +20,18 @@ namespace R2MEGA::Window
         bool running = true;
         bool aboutOpen = false;
         OpenHandler openHandler;
-        RomProvider romProvider;
         VideoProvider videoProvider;
         RunningProvider runningProvider;
-        RomPreview preview;
+        VideoStatusProvider videoStatusProvider;
         FileManager files;
-        explicit Impl(OpenHandler handler, RomProvider provider, VideoProvider video, RunningProvider running)
-            : openHandler(std::move(handler)), romProvider(std::move(provider)), videoProvider(std::move(video)),
-              runningProvider(std::move(running)), files([this](const std::filesystem::path &path)
-                                                         {
+        explicit Impl(OpenHandler handler, VideoProvider video,
+                      RunningProvider running, VideoStatusProvider status)
+            : openHandler(std::move(handler)), videoProvider(std::move(video)),
+              runningProvider(std::move(running)), videoStatusProvider(std::move(status)),
+              files([this](const std::filesystem::path &path)
+                    {
                 if (!openHandler) throw std::runtime_error("ROM loading is unavailable.");
                 const auto name = openHandler(path);
-                if (romProvider)
-                    if (const auto *rom = romProvider()) preview.reset(*rom);
                 const auto title = std::string("R2MEGA v." R2_APP_VERSION " | ") + name;
                 SDL_SetWindowTitle(window, title.c_str()); }) {}
         ~Impl()
@@ -54,10 +53,10 @@ namespace R2MEGA::Window
         }
     };
 
-    Window::Window(OpenHandler openHandler, RomProvider romProvider, VideoProvider videoProvider,
-                   RunningProvider runningProvider)
-        : impl_(std::make_unique<Impl>(std::move(openHandler), std::move(romProvider),
-                                       std::move(videoProvider), std::move(runningProvider))) {}
+    Window::Window(OpenHandler openHandler, VideoProvider videoProvider,
+                   RunningProvider runningProvider, VideoStatusProvider videoStatusProvider)
+        : impl_(std::make_unique<Impl>(std::move(openHandler), std::move(videoProvider), std::move(runningProvider),
+                                       std::move(videoStatusProvider))) {}
     Window::~Window() = default;
 
     void Window::open()
@@ -150,24 +149,46 @@ namespace R2MEGA::Window
             }
             ImGui::EndMainMenuBar();
         }
-        if (s.romProvider)
-            if (const auto *rom = s.romProvider())
-                s.preview.draw(*rom);
-        if (s.videoTexture && s.videoProvider)
-            if (const auto *pixels = s.videoProvider())
+        const auto *pixels = s.videoProvider ? s.videoProvider() : nullptr;
+        if (s.videoTexture && pixels)
+        {
+            if (!SDL_UpdateTexture(s.videoTexture, nullptr, pixels, 256 * sizeof(std::uint32_t)))
+                throw std::runtime_error(SDL_GetError());
+        }
+        const auto *viewport = ImGui::GetMainViewport();
+        auto *background = ImGui::GetBackgroundDrawList();
+        if (pixels && s.videoStatusProvider)
+        {
+            const auto status = s.videoStatusProvider();
+            char counter[96];
+            std::snprintf(counter, sizeof(counter), "Quadro: %llu  |  PC: $%06X",
+                          static_cast<unsigned long long>(status.frame), status.pc);
+            std::string message = counter;
+            message += "\nVDP parcial: planos A/B em H32, sem sprites.";
+            if (!status.displayEnabled)
+                message += "\nExibição da VDP ainda não ativada.";
+            if (s.runningProvider && !s.runningProvider())
             {
-                if (!SDL_UpdateTexture(s.videoTexture, nullptr, pixels, 256 * sizeof(std::uint32_t)))
-                    throw std::runtime_error(SDL_GetError());
-                ImGui::SetNextWindowSize(ImVec2(540, 500), ImGuiCond_FirstUseEver);
-                if (ImGui::Begin("Saída da VDP"))
-                {
-                    ImGui::TextUnformatted("Quadro parcial: cor de fundo em H32.");
-                    if (s.runningProvider && !s.runningProvider())
-                        ImGui::TextUnformatted("Emulação pausada: falta implementar uma instrução ou dispositivo.");
-                    ImGui::Image(reinterpret_cast<ImTextureID>(s.videoTexture), ImVec2(512, 448));
-                }
-                ImGui::End();
+                message += "\nEmulação pausada.";
+                if (!status.error.empty())
+                    message += " " + status.error;
             }
+            const float wrapWidth = std::max(1.0f, viewport->WorkSize.x - 40.0f);
+            const auto textSize = ImGui::CalcTextSize(message.c_str(), nullptr, false, wrapWidth);
+            const ImVec2 position(viewport->WorkPos.x + 12.0f, viewport->WorkPos.y + 12.0f);
+            background->AddRectFilled(position, ImVec2(position.x + std::min(wrapWidth, textSize.x) + 16.0f, position.y + textSize.y + 16.0f), IM_COL32(0, 0, 0, 210), 5.0f);
+            background->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                                ImVec2(position.x + 8.0f, position.y + 8.0f), IM_COL32_WHITE,
+                                message.c_str(), nullptr, wrapWidth);
+        }
+        else if (!pixels)
+        {
+            constexpr const char *prompt = "Use File > Open... (Ctrl+O) para carregar uma ROM.";
+            const auto size = ImGui::CalcTextSize(prompt);
+            background->AddText(ImVec2(viewport->WorkPos.x + (viewport->WorkSize.x - size.x) * 0.5f,
+                                       viewport->WorkPos.y + (viewport->WorkSize.y - size.y) * 0.5f),
+                                IM_COL32_WHITE, prompt);
+        }
         if (openAbout)
         {
             s.aboutOpen = true;
@@ -196,6 +217,23 @@ namespace R2MEGA::Window
         ImGui::Render();
         if (!SDL_SetRenderDrawColor(s.renderer, 0, 0, 0, 255) || !SDL_RenderClear(s.renderer))
             throw std::runtime_error(SDL_GetError());
+        if (s.videoTexture && pixels)
+        {
+            int outputWidth = 0, outputHeight = 0;
+            if (!SDL_GetRenderOutputSize(s.renderer, &outputWidth, &outputHeight))
+                throw std::runtime_error(SDL_GetError());
+            const float menuHeight = ImGui::GetFrameHeight() * ImGui::GetIO().DisplayFramebufferScale.y;
+            const float availableHeight = std::max(0.0f, outputHeight - menuHeight);
+            const float scale = std::min(outputWidth / 256.0f, availableHeight / 224.0f);
+            if (scale > 0)
+            {
+                const SDL_FRect destination{(outputWidth - 256.0f * scale) * 0.5f,
+                                            menuHeight + (availableHeight - 224.0f * scale) * 0.5f,
+                                            256.0f * scale, 224.0f * scale};
+                if (!SDL_RenderTexture(s.renderer, s.videoTexture, nullptr, &destination))
+                    throw std::runtime_error(SDL_GetError());
+            }
+        }
         ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), s.renderer);
         if (!SDL_RenderPresent(s.renderer))
             throw std::runtime_error(SDL_GetError());
