@@ -1,5 +1,6 @@
 #include "Core/Board.h"
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -8,11 +9,15 @@
 
 using namespace R2MEGA::Core;
 
-static void require(bool value)
+static void requireAt(bool value, int line)
 {
     if (!value)
+    {
+        std::fprintf(stderr, "Falha no teste da placa na linha %d\n", line);
         throw std::runtime_error("Falha no teste da placa");
+    }
 }
+#define require(value) requireAt((value), __LINE__)
 
 int main(int argc, char **argv)
 {
@@ -38,9 +43,9 @@ int main(int argc, char **argv)
     require(board.readByte(0) == 0 && board.readWord(0) == 0x00ff);
     require(board.readWord(2) == 0xff00);
     require(board.readWord(0xa10000) == 0x00a0);
-    require(board.readWord(0xc00004) == 0x0208);
-    require(board.readWord(0xc00006) == 0x0208);
-    require(board.readByte(0xc00004) == 0x02 && board.readByte(0xc00005) == 8);
+    require(board.readWord(0xc00004) == 0x0200);
+    require(board.readWord(0xc00006) == 0x0200);
+    require(board.readByte(0xc00004) == 0x02 && board.readByte(0xc00005) == 0);
     board.writeWord(0xc00004, 0x8f02); // Incremento automático de dois bytes.
     board.writeWord(0xc00004, 0xc000); // Endereço zero da CRAM.
     board.writeWord(0xc00006, 0x0000);
@@ -180,6 +185,38 @@ int main(int argc, char **argv)
         interruptBoard.clock();
     require(interruptBoard.m68k().state().pc == 0x20 &&
             interruptBoard.m68k().state().sr == 0x2000);
+
+    const auto verticalPath = directory / "board-vertical-interrupt.bin";
+    std::vector<unsigned char> verticalRom(0x100);
+    const auto putVerticalWord = [&](unsigned address, std::uint16_t value)
+    {
+        verticalRom[address] = static_cast<unsigned char>(value >> 8);
+        verticalRom[address + 1] = static_cast<unsigned char>(value);
+    };
+    putVerticalWord(0, 0x00ff);
+    putVerticalWord(2, 0xff00); // SSP na Work RAM.
+    putVerticalWord(6, 8);      // O RTE inicial restaura SR e PC da pilha.
+    putVerticalWord(8, 0x4e73);
+    putVerticalWord(0x20, 0x60fe); // Aguarda a interrupção em um laço.
+    putVerticalWord(0x40, 0x7001); // Tratador vertical: MOVEQ #1,D0.
+    putVerticalWord(0x42, 0x4e73);
+    putVerticalWord(30 * 4, 0);
+    putVerticalWord(30 * 4 + 2, 0x40); // Autovetor de nível 6.
+    {
+        std::ofstream file(verticalPath, std::ios::binary);
+        file.write(reinterpret_cast<const char *>(verticalRom.data()), verticalRom.size());
+        require(bool(file));
+    }
+    auto verticalBoard = std::make_unique<Board>();
+    verticalBoard->insertCartridge(Cartridge::load(verticalPath));
+    verticalBoard->writeWord(0xffff00, 0x2000);
+    verticalBoard->writeWord(0xffff02, 0);
+    verticalBoard->writeWord(0xffff04, 0x20);
+    verticalBoard->writeWord(0xc00004, 0x8120);
+    const auto deadline = VDP::visibleLines * VDP::masterCyclesPerLine + 2000;
+    while (verticalBoard->masterCycles() < deadline && verticalBoard->m68k().state().data[0] != 1)
+        verticalBoard->clock();
+    require(verticalBoard->m68k().state().data[0] == 1 && verticalBoard->vdp().interruptLevel() == 0);
 
     const auto dmaPath = directory / "board-dma.bin";
     std::vector<unsigned char> dmaRom(0x100);

@@ -1,27 +1,32 @@
 #include "Core/VDP/VDP.h"
+#include <cstdio>
 #include <stdexcept>
 
 using namespace R2MEGA::Core;
 
-static void require(bool condition)
+static void requireAt(bool condition, int line)
 {
     if (!condition)
+    {
+        std::fprintf(stderr, "Falha no teste do VDP na linha %d\n", line);
         throw std::runtime_error("Falha no teste do VDP");
+    }
 }
+#define require(condition) requireAt((condition), __LINE__)
 
 int main()
 {
     VDP vdp;
     require(vdp.frame() == 0 && vdp.line() == 0 && vdp.dot() == 0);
-    require(vdp.readStatus() == 0x0208);
+    require(vdp.readStatus() == 0x0200);
     for (unsigned i = 0; i < 279; ++i)
         vdp.clock();
-    require(vdp.dot() == 27 && vdp.readStatus() == 0x0208);
+    require(vdp.dot() == 27 && vdp.readStatus() == 0x0200);
     vdp.clock();
-    require(vdp.dot() == 28 && vdp.readStatus() == 0x020c);
+    require(vdp.dot() == 28 && vdp.readStatus() == 0x0204);
     for (unsigned i = 280; i < 860; ++i)
         vdp.clock();
-    require(vdp.dot() == 86 && vdp.readStatus() == 0x0208);
+    require(vdp.dot() == 86 && vdp.readStatus() == 0x0200);
     for (unsigned i = 860; i < VDP::masterCyclesPerLine; ++i)
         vdp.clock();
     require(vdp.line() == 1 && vdp.dot() == 0);
@@ -32,10 +37,25 @@ int main()
     for (unsigned line = 224; line < VDP::linesPerFrame; ++line)
         for (unsigned cycle = 0; cycle < VDP::masterCyclesPerLine; ++cycle)
             vdp.clock();
-    require(vdp.frame() == 1 && vdp.line() == 0 && vdp.readStatus() == 0x0208);
+    require(vdp.frame() == 1 && vdp.line() == 0 && vdp.readStatus() == 0x0280);
+    require(vdp.readStatus() == 0x0200);
     vdp.clock();
     vdp.reset();
     require(vdp.frame() == 0 && vdp.line() == 0 && vdp.cycleInLine() == 0);
+
+    VDP vertical;
+    vertical.writeControl(0x8120); // Habilita a interrupção vertical com a imagem desligada.
+    for (std::uint32_t i = 0; i < VDP::visibleLines * VDP::masterCyclesPerLine + VDP::verticalInterruptCycle; ++i)
+        vertical.clock();
+    require(vertical.line() == VDP::visibleLines && vertical.interruptLevel() == 0);
+    require(vertical.readStatus() == 0x020c);
+    vertical.clock();
+    require(vertical.interruptLevel() == 6 && vertical.readStatus() == 0x028c);
+    require(vertical.readStatus() == 0x020c && vertical.interruptLevel() == 6);
+    vertical.acknowledgeInterrupt(6);
+    require(vertical.interruptLevel() == 0);
+    vertical.reset();
+    require(vertical.interruptLevel() == 0 && vertical.readStatus() == 0x0200);
 
     vdp.writeControl(0x8f02); // Incremento automático de dois bytes.
     vdp.writeControl(0x5234); // Escrita na VRAM em $1234.
