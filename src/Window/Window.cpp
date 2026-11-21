@@ -77,7 +77,7 @@ namespace R2MEGA::Window
         if (s.videoProvider)
         {
             s.videoTexture = SDL_CreateTexture(s.renderer, SDL_PIXELFORMAT_ARGB8888,
-                                               SDL_TEXTUREACCESS_STREAMING, 256, 224);
+                                               SDL_TEXTUREACCESS_STREAMING, 320, 224);
             if (!s.videoTexture)
                 throw std::runtime_error(SDL_GetError());
             SDL_SetTextureScaleMode(s.videoTexture, SDL_SCALEMODE_NEAREST);
@@ -152,19 +152,21 @@ namespace R2MEGA::Window
         const auto *pixels = s.videoProvider ? s.videoProvider() : nullptr;
         if (s.videoTexture && pixels)
         {
-            if (!SDL_UpdateTexture(s.videoTexture, nullptr, pixels, 256 * sizeof(std::uint32_t)))
+            if (!SDL_UpdateTexture(s.videoTexture, nullptr, pixels, 320 * sizeof(std::uint32_t)))
                 throw std::runtime_error(SDL_GetError());
         }
         const auto *viewport = ImGui::GetMainViewport();
         auto *background = ImGui::GetBackgroundDrawList();
+        const auto status = pixels && s.videoStatusProvider ? s.videoStatusProvider() : VideoStatus{};
+        const unsigned videoWidth = std::clamp(status.width, 1u, 320u);
         if (pixels && s.videoStatusProvider)
         {
-            const auto status = s.videoStatusProvider();
             char counter[96];
             std::snprintf(counter, sizeof(counter), "Quadro: %llu  |  PC: $%06X",
                           static_cast<unsigned long long>(status.frame), status.pc);
             std::string message = counter;
-            message += "\nVDP parcial: planos A/B em H32, sem sprites.";
+            message += videoWidth == 320 ? "\nVDP parcial: planos A/B em H40, sem sprites."
+                                         : "\nVDP parcial: planos A/B em H32, sem sprites.";
             if (!status.displayEnabled)
                 message += "\nExibição da VDP ainda não ativada.";
             if (s.runningProvider && !s.runningProvider())
@@ -224,13 +226,14 @@ namespace R2MEGA::Window
                 throw std::runtime_error(SDL_GetError());
             const float menuHeight = ImGui::GetFrameHeight() * ImGui::GetIO().DisplayFramebufferScale.y;
             const float availableHeight = std::max(0.0f, outputHeight - menuHeight);
-            const float scale = std::min(outputWidth / 256.0f, availableHeight / 224.0f);
+            const float scale = std::min(outputWidth / float(videoWidth), availableHeight / 224.0f);
             if (scale > 0)
             {
-                const SDL_FRect destination{(outputWidth - 256.0f * scale) * 0.5f,
+                const SDL_FRect source{0, 0, float(videoWidth), 224};
+                const SDL_FRect destination{(outputWidth - videoWidth * scale) * 0.5f,
                                             menuHeight + (availableHeight - 224.0f * scale) * 0.5f,
-                                            256.0f * scale, 224.0f * scale};
-                if (!SDL_RenderTexture(s.renderer, s.videoTexture, nullptr, &destination))
+                                            videoWidth * scale, 224.0f * scale};
+                if (!SDL_RenderTexture(s.renderer, s.videoTexture, &source, &destination))
                     throw std::runtime_error(SDL_GetError());
             }
         }

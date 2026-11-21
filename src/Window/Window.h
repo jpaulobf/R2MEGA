@@ -14,7 +14,7 @@ namespace R2MEGA::Window
         // Carrega o arquivo selecionado e retorna o nome a ser exibido.
         using OpenHandler = std::function<std::string(const std::filesystem::path &)>;
 
-        // Quadro ARGB8888 de 256 x 224 pixels pertencente ao núcleo.
+        // Quadro ARGB8888 com stride de 320 pixels e altura de 224 linhas.
         using VideoProvider = std::function<const std::uint32_t *()>;
         using RunningProvider = std::function<bool()>;
         // Dados de execução mostrados junto ao quadro da VDP.
@@ -22,6 +22,7 @@ namespace R2MEGA::Window
         {
             std::uint64_t frame = 0;
             std::uint32_t pc = 0;
+            unsigned width = 256;
             bool displayEnabled = false;
             std::string error;
         };
