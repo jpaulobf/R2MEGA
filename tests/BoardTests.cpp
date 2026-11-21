@@ -41,6 +41,17 @@ int main(int argc, char **argv)
     board.insertCartridge(Cartridge::load(path));
     require(board.masterCycles() == 0 && !board.m68k().resetVectorsLoaded());
     require(board.readByte(0) == 0 && board.readWord(0) == 0x00ff);
+    require(board.readByte(0xa04000) == 0 && board.readWord(0xa04000) == 0);
+    board.writeByte(0xa04000, 0x22);
+    board.writeByte(0xa04001, 0x5a);
+    board.writeByte(0xa04002, 0x33);
+    board.writeByte(0xa04003, 0xa5);
+    require(board.ym2612().registerValue(0, 0x22) == 0x5a &&
+            board.ym2612().registerValue(1, 0x33) == 0xa5);
+    require(board.readMemory(0x4000) == 0);
+    board.writeMemory(0x4000, 0x44);
+    board.writeMemory(0x4001, 0x66);
+    require(board.ym2612().registerValue(0, 0x44) == 0x66);
     require(board.readWord(2) == 0xff00);
     require(board.readWord(0xa10000) == 0x00a0);
     require(board.readWord(0xc00004) == 0x0200);

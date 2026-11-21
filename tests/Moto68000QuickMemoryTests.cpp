@@ -278,6 +278,54 @@ namespace
         check(wait.transfers == std::vector<std::pair<char, std::uint32_t>>({{'R', 0x300}, {'R', 0x108}, {'W', 0x300}}),
               "espera de leitura não deve duplicar transferências");
     }
+
+    void conditionByteStores()
+    {
+        Bus postincrement;
+        postincrement.setup();
+        postincrement.putWord(0x100, 0x41f8); // LEA $0300.W,A0.
+        postincrement.putWord(0x102, 0x0300);
+        postincrement.putWord(0x104, 0x56d8); // SNE (A0)+.
+        postincrement.bytes[0x300] = 0x12;
+        Moto68000 postCpu(postincrement);
+        boot(postCpu);
+        execute(postCpu);
+        const auto postFlags = postCpu.state().sr;
+        execute(postCpu);
+        check(postincrement.byte(0x300) == 0xff && postCpu.state().address[0] == 0x301 &&
+                  postCpu.state().sr == postFlags && postCpu.state().pc == 0x106,
+              "SNE (An)+ deve escrever byte e incrementar o endereço sem alterar flags");
+
+        Bus bus;
+        bus.setup();
+        bus.putWord(0x100, 0x56f8); // SNE $0300.W.
+        bus.putWord(0x102, 0x0300);
+        bus.putWord(0x104, 0x56c0); // SNE D0.
+        bus.bytes[0x300] = 0x12;
+        Moto68000 cpu(bus);
+        boot(cpu);
+        const auto flags = cpu.state().sr;
+        execute(cpu);
+        check(bus.byte(0x300) == 0xff && cpu.state().pc == 0x104 && cpu.state().sr == flags,
+              "SNE absoluto curto deve escrever um byte sem alterar os flags");
+        execute(cpu);
+        check((cpu.state().data[0] & 0xff) == 0xff && cpu.state().sr == flags,
+              "SNE em Dn deve preservar os flags");
+
+        Bus equal;
+        equal.setup();
+        equal.putWord(0x100, 0x7000); // MOVEQ #0,D0 marca Z.
+        equal.putWord(0x102, 0x56f8);
+        equal.putWord(0x104, 0x0300);
+        equal.bytes[0x300] = 0xff;
+        Moto68000 equalCpu(equal);
+        boot(equalCpu);
+        execute(equalCpu);
+        const auto equalFlags = equalCpu.state().sr;
+        execute(equalCpu);
+        check(equal.byte(0x300) == 0 && equalCpu.state().sr == equalFlags,
+              "SNE deve escrever zero quando Z está ativo");
+    }
 }
 
 int main()
@@ -287,6 +335,7 @@ int main()
         addressRegisters();
         memoryModes();
         stackPointerAndWaits();
+        conditionByteStores();
     }
     catch (const std::exception &error)
     {

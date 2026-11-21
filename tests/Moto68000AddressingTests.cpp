@@ -165,6 +165,23 @@ int main()
               displacedLeaCpu.state().pc == 0x108,
           "LEA com deslocamento de An calcula o endereço em oito ciclos");
 
+    Bus indexedLea;
+    setup(indexedLea);
+    indexedLea.putWord(0x100, 0x7203); // MOVEQ #3,D1.
+    indexedLea.putWord(0x102, 0x41f0); // LEA (4,A0,D1.W),A0.
+    indexedLea.putWord(0x104, 0x1004);
+    indexedLea.putWord(0x106, 0x43fb); // LEA (4,PC,D1.W),A1.
+    indexedLea.putWord(0x108, 0x1004);
+    Moto68000 indexedLeaCpu(indexedLea);
+    indexedLeaCpu.reset();
+    run(indexedLeaCpu, 40 + 4 + 12);
+    check(indexedLeaCpu.state().address[0] == 7 && indexedLeaCpu.state().pc == 0x106 &&
+              indexedLeaCpu.state().sr == 0x2700,
+          "LEA indexado por An calcula o endereço em doze ciclos sem alterar flags");
+    run(indexedLeaCpu, 12);
+    check(indexedLeaCpu.state().address[1] == 0x10f && indexedLeaCpu.state().pc == 0x10a,
+          "LEA indexado pelo PC usa a palavra de extensão como base");
+
     Bus postByte;
     setup(postByte);
     postByte.putWord(0x100, 0x41f8);
