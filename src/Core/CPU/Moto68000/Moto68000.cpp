@@ -126,7 +126,7 @@ namespace R2MEGA::Core
             const bool immediate = sourceMode == 7 && sourceReg == 4;
             const bool registerTarget = targetMode == 0 ||
                                         (targetMode == 1 && !byte);
-            const bool memoryTarget = (targetMode >= 2 && targetMode <= 5) ||
+            const bool memoryTarget = (targetMode >= 2 && targetMode <= 6) ||
                                       (targetMode == 7 && targetReg <= 1);
             return (registerSource || memorySource || immediate) &&
                    (registerTarget || memoryTarget);
@@ -770,6 +770,12 @@ namespace R2MEGA::Core
                 {
                     if (fetchProgram())
                         --move.targetFetchesLeft;
+                    return;
+                }
+                if (move.targetIdle)
+                {
+                    --move.targetIdle;
+                    bus_.observe(pins_);
                     return;
                 }
                 move.phase = move.targetMode <= 1 ? CombinedMove::Phase::PrefetchAfterWrite : move.targetMode == 4 ? CombinedMove::Phase::PrefetchBeforeWrite
@@ -2448,17 +2454,24 @@ namespace R2MEGA::Core
             if ((opcode & 0xffc0) == 0x4e80 || (opcode & 0xffc0) == 0x4ec0)
             {
                 const unsigned mode = (opcode >> 3) & 7, reg = opcode & 7;
-                if (mode != 2 && mode != 5 && !(mode == 7 && reg <= 2))
+                if (mode != 2 && mode != 5 && mode != 6 &&
+                    !(mode == 7 && reg <= 3))
                     throw std::logic_error("Modo de endereçamento de JSR/JMP não implementado");
                 controlOp_ = (opcode & 0x0040) ? ControlOp::Jmp : ControlOp::Jsr;
                 controlStage_ = 0;
-                controlIdle_ = mode == 2 || (mode == 7 && reg == 1) ? 0 : 2;
+                controlIdle_ = mode == 6 || (mode == 7 && reg == 3)   ? 6
+                               : mode == 2 || (mode == 7 && reg == 1) ? 0
+                                                                      : 2;
                 controlExtensionPending_ = mode == 7 && reg == 1;
                 controlIr_ = opcode;
                 controlReturn_ = state_.pc + (mode == 2 ? 2 : mode == 7 && reg == 1 ? 6
                                                                                     : 4);
                 if (mode == 2)
                     controlTarget_ = state_.address[reg];
+                else if (mode == 6 || (mode == 7 && reg == 3))
+                    controlTarget_ = moveMemoryAddress(mode, reg, state_.address,
+                                                       state_.data, state_.prefetch[1], 0,
+                                                       state_.pc + 2);
                 else if (mode == 5)
                     controlTarget_ = state_.address[reg] + signedWord(state_.prefetch[1]);
                 else if (reg == 0)
@@ -2602,11 +2615,14 @@ namespace R2MEGA::Core
                 clockMultiplyDivide();
                 return;
             }
-            else if ((opcode & 0xf1ff) == 0x41f8 ||
+            else if ((opcode & 0xf1f8) == 0x41e8 ||
+                     (opcode & 0xf1ff) == 0x41f8 ||
+                     (opcode & 0xf1ff) == 0x41f9 ||
                      (opcode & 0xf1ff) == 0x41fa)
             {
                 memoryOp_ = MemoryOp::Lea;
                 memoryStage_ = 0;
+                memoryValue_ = 0;
             }
             else if ((opcode >> 12) >= 1 && (opcode >> 12) <= 3 &&
                      (((((opcode >> 6) & 7) == 0) && (((opcode >> 3) & 7) >= 2) &&
@@ -2674,6 +2690,7 @@ namespace R2MEGA::Core
                                           (move.sourceMode == 7 && move.sourceReg == 3)
                                       ? 2
                                       : 0;
+                move.targetIdle = move.targetMode == 6 ? 2 : 0;
                 if (move.sourceExtensions)
                     move.sourceExtension[0] = state_.prefetch[1];
                 else if (move.targetExtensions)
@@ -3309,17 +3326,27 @@ namespace R2MEGA::Core
         {
             if (memoryOp_ == MemoryOp::Lea)
             {
-                if (memoryStage_++ == 0)
+                if ((opcode & 7) == 1 && memoryStage_ == 0)
+                {
+                    memoryValue_ = pendingWord_; // Segunda palavra do endereço absoluto longo.
+                    ++memoryStage_;
+                }
+                else if (memoryStage_++ == 0)
+                    memoryPrefetch_ = pendingWord_;
+                else if ((opcode & 7) == 1 && memoryStage_ == 2)
                     memoryPrefetch_ = pendingWord_;
                 else
                 {
                     const unsigned reg = (opcode >> 9) & 7;
                     const int displacement = signedWord(state_.prefetch[1]);
-                    state_.address[reg] = (opcode & 7) == 2
-                                              ? state_.pc + 2 + displacement
-                                              : static_cast<std::uint32_t>(displacement);
+                    state_.address[reg] = ((opcode >> 3) & 7) == 5
+                                              ? state_.address[opcode & 7] + displacement
+                                          : (opcode & 7) == 1
+                                              ? (std::uint32_t(state_.prefetch[1]) << 16) | memoryValue_
+                                          : (opcode & 7) == 2 ? state_.pc + 2 + displacement
+                                                              : static_cast<std::uint32_t>(displacement);
                     state_.prefetch = {memoryPrefetch_, pendingWord_};
-                    state_.pc += 4;
+                    state_.pc += (opcode & 7) == 1 ? 6 : 4;
                     ++state_.instructions;
                     memoryOp_ = MemoryOp::None;
                 }

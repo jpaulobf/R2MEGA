@@ -170,7 +170,7 @@ namespace R2MEGA::Core
             unsigned sourceFetchesLeft = 0, targetFetchesLeft = 0;
             unsigned streamIndex = 2;
             unsigned sourceReads = 0, targetWrites = 0;
-            unsigned sourceIdle = 0;
+            unsigned sourceIdle = 0, targetIdle = 0;
             bool immediate = false;
             bool specialAbsoluteLong = false;
             bool sourceAddressReady = false, targetAddressReady = false;
