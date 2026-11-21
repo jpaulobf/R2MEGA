@@ -16,6 +16,7 @@ namespace R2MEGA::Core
     Board::Board() : cpu_(*this), z80_(*this), scheduler_(*this)
     {
         sn76489_.reset();
+        ym2612_.reset();
         vdp_.setDmaReader([this](std::uint32_t address)
                           { return readWord(address); });
     }
@@ -29,6 +30,7 @@ namespace R2MEGA::Core
         controllers_.reset();
         vdp_.reset();
         sn76489_.reset();
+        ym2612_.reset();
         scheduler_.reset();
         cpu_.reset();
         z80_.reset();
@@ -107,6 +109,12 @@ namespace R2MEGA::Core
                 throw std::logic_error("Barramento do Z80 ainda não concedido ao 68000");
             return audioRam_.read(address & 0x1fff);
         }
+        if (address >= 0xa04000 && address <= 0xa04003)
+        {
+            if (!z80BusGranted())
+                throw std::logic_error("Barramento do Z80 ainda não concedido ao 68000");
+            return static_cast<std::uint8_t>(ym2612_.readStatus());
+        }
         if (address == 0xa11100)
             return z80BusGranted() ? 0 : 1;
         if (address == 0xa11101)
@@ -142,6 +150,13 @@ namespace R2MEGA::Core
 
     void Board::writeByte(std::uint32_t address, std::uint8_t value)
     {
+        if (address >= 0xa04000 && address <= 0xa04003)
+        {
+            if (!z80BusGranted())
+                throw std::logic_error("Barramento do Z80 ainda não concedido ao 68000");
+            ym2612_.writePort(address & 3, value);
+            return;
+        }
         if (address >= 0xa06000 && address <= 0xa060ff && !(address & 1))
         {
             if (!z80BusGranted())
@@ -191,6 +206,11 @@ namespace R2MEGA::Core
     {
         if (address & 1)
             throw std::invalid_argument("Unaligned 68000 word write");
+        if (address == 0xa04000 || address == 0xa04002)
+        {
+            writeByte(address, std::uint8_t(value >> 8));
+            return;
+        }
         if (address >= 0xa06000 && address <= 0xa060fe)
         {
             writeByte(address, std::uint8_t(value >> 8));
@@ -238,6 +258,8 @@ namespace R2MEGA::Core
     {
         if (address < 0x4000)
             return audioRam_.read(address & 0x1fff);
+        if (address >= 0x4000 && address < 0x6000)
+            return static_cast<std::uint8_t>(ym2612_.readStatus());
         if (address >= 0x8000)
         {
             const auto mapped = (std::uint32_t(z80Bank_) << 15) | (address & 0x7fff);
@@ -250,6 +272,11 @@ namespace R2MEGA::Core
     }
     void Board::writeMemory(std::uint16_t address, std::uint8_t value)
     {
+        if (address >= 0x4000 && address < 0x6000)
+        {
+            ym2612_.writePort(address & 3, value);
+            return;
+        }
         if (address >= 0x6000 && address <= 0x60ff)
         {
             writeZ80BankBit(value);

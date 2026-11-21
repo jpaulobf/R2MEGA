@@ -30,6 +30,7 @@ namespace R2MEGA::Core
         const VDP &vdp() const { return vdp_; }
         const Z80 &z80() const { return z80_; }
         const SN76489 &psg() const { return sn76489_; }
+        const YM2612 &ym2612() const { return ym2612_; }
         // Permite que os componentes da placa apresentem um nível IPL ao 68000.
         void setM68KInterruptLevel(unsigned level);
 
