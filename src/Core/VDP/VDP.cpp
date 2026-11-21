@@ -1,4 +1,5 @@
 #include "Core/VDP/VDP.h"
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -16,6 +17,9 @@ namespace R2MEGA::Core
         cram_.clear();
         vsram_.clear();
         pixels_.fill(0xff000000);
+        spriteLine_.fill({});
+        spriteCollision_ = false;
+        spriteOverflow_ = false;
         address_ = 0;
         code_ = 0;
         commandPending_ = false;
@@ -40,7 +44,11 @@ namespace R2MEGA::Core
         {
             const auto x = (cycleInLine_ - 860) / cyclesPerDot;
             if (x < visibleWidth())
+            {
+                if (x == 0)
+                    prepareSpriteLine(line_);
                 pixels_[line_ * width + x] = renderPixel(x, line_);
+            }
         }
         if (++cycleInLine_ != masterCyclesPerLine)
             return;
@@ -65,7 +73,13 @@ namespace R2MEGA::Core
             status |= 0x0004; // HBlank.
         if (verticalInterruptFlag_)
             status |= 0x0080;
+        if (spriteCollision_)
+            status |= 0x0020;
+        if (spriteOverflow_)
+            status |= 0x0040;
         verticalInterruptFlag_ = false;
+        spriteCollision_ = false;
+        spriteOverflow_ = false;
         return status;
     }
 
@@ -111,17 +125,101 @@ namespace R2MEGA::Core
         return {std::uint8_t(((attribute >> 9) & 0x30) | color), (attribute & 0x8000) != 0};
     }
 
+    std::uint16_t VDP::spriteWord(unsigned address) const
+    {
+        return std::uint16_t((unsigned(vram_.read(std::uint16_t(address))) << 8) |
+                             vram_.read(std::uint16_t(address + 1)));
+    }
+
+    void VDP::prepareSpriteLine(unsigned y)
+    {
+        spriteLine_.fill({});
+        if (!(registers_[1] & 0x40))
+            return;
+
+        const bool h40 = (registers_[12] & 1) != 0;
+        const unsigned maxSprites = h40 ? 80 : 64;
+        const unsigned maxLineSprites = h40 ? 20 : 16;
+        const unsigned base = unsigned(registers_[5] & (h40 ? 0x7e : 0x7f)) << 9;
+        unsigned link = 0;
+        unsigned lineSprites = 0;
+        unsigned remainingDots = visibleWidth();
+        // A ordem da lista define qual sprite conserva o pixel em uma sobreposição.
+        for (unsigned visited = 0; visited < maxSprites; ++visited)
+        {
+            const unsigned entry = base + link * 8;
+            const unsigned positionY = spriteWord(entry) & 0x1ff;
+            const unsigned sizeAndLink = spriteWord(entry + 2);
+            const unsigned attribute = spriteWord(entry + 4);
+            const unsigned positionX = spriteWord(entry + 6) & 0x1ff;
+            const unsigned tilesWide = ((sizeAndLink >> 10) & 3) + 1;
+            const unsigned tilesHigh = ((sizeAndLink >> 8) & 3) + 1;
+            const unsigned localY = (y + 128 - positionY) & 0x1ff;
+            const unsigned next = sizeAndLink & 0x7f;
+
+            if (localY < tilesHigh * 8)
+            {
+                if (lineSprites == maxLineSprites || remainingDots == 0)
+                {
+                    spriteOverflow_ = true;
+                    break;
+                }
+                ++lineSprites;
+                const unsigned spriteWidth = tilesWide * 8;
+                const unsigned drawnDots = std::min(spriteWidth, remainingDots);
+                remainingDots -= drawnDots;
+
+                // X igual a zero oculta os sprites seguintes desta linha.
+                if (positionX == 0)
+                    break;
+
+                const unsigned sourceY = (attribute & 0x1000) ? tilesHigh * 8 - 1 - localY : localY;
+                for (unsigned localX = 0; localX < drawnDots; ++localX)
+                {
+                    const int x = int(positionX) - 128 + int(localX);
+                    if (x < 0 || x >= int(visibleWidth()))
+                        continue;
+                    const unsigned sourceX = (attribute & 0x0800) ? spriteWidth - 1 - localX : localX;
+                    // Os tiles de um sprite avançam primeiro na vertical.
+                    const unsigned tile = ((attribute & 0x07ff) +
+                                           (sourceX >> 3) * tilesHigh + (sourceY >> 3)) &
+                                          0x07ff;
+                    const auto patternAddress = std::uint16_t(tile * 32 + (sourceY & 7) * 4 + ((sourceX & 7) >> 1));
+                    const unsigned pattern = vram_.read(patternAddress);
+                    const unsigned color = (sourceX & 1) ? pattern & 15 : pattern >> 4;
+                    if (color == 0)
+                        continue;
+                    auto &pixel = spriteLine_[unsigned(x)];
+                    if (pixel.color)
+                    {
+                        spriteCollision_ = true;
+                        continue;
+                    }
+                    pixel = {std::uint8_t(((attribute >> 9) & 0x30) | color), (attribute & 0x8000) != 0};
+                }
+            }
+            if (next == 0 || next >= maxSprites)
+                break;
+            link = next;
+        }
+    }
+
     std::uint32_t VDP::renderPixel(unsigned x, unsigned y) const
     {
         if (!(registers_[1] & 0x40))
             return backdropColor();
         const auto a = planePixel(0, x, y);
         const auto b = planePixel(1, x, y);
-        // Ordem do modo 5: A alta, B alta, A baixa e B baixa.
+        const auto sprite = spriteLine_[x];
+        // Ordem do modo 5: sprites altos, A alta, B alta, sprites baixos, A baixa e B baixa.
+        if (sprite.color && sprite.priority)
+            return paletteColor(sprite.color);
         if (a.color && a.priority)
             return paletteColor(a.color);
         if (b.color && b.priority)
             return paletteColor(b.color);
+        if (sprite.color)
+            return paletteColor(sprite.color);
         if (a.color)
             return paletteColor(a.color);
         if (b.color)

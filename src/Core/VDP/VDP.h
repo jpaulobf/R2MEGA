@@ -65,6 +65,8 @@ namespace R2MEGA::Core
             Copy
         };
         PlanePixel planePixel(unsigned plane, unsigned x, unsigned y) const;
+        void prepareSpriteLine(unsigned y);
+        std::uint16_t spriteWord(unsigned address) const;
         std::uint32_t renderPixel(unsigned x, unsigned y) const;
         std::uint32_t paletteColor(unsigned index) const;
         std::uint32_t backdropColor() const;
@@ -81,6 +83,9 @@ namespace R2MEGA::Core
         CRAM cram_;
         VSRAM vsram_;
         std::array<std::uint32_t, width * height> pixels_{};
+        std::array<PlanePixel, width> spriteLine_{};
+        bool spriteCollision_ = false;
+        bool spriteOverflow_ = false;
         std::uint16_t address_ = 0;
         std::uint8_t code_ = 0;
         bool commandPending_ = false;
