@@ -280,7 +280,7 @@ namespace R2MEGA::Core
         }
         // A exceção usa o SSP e limpa o bit de rastreamento.
         state_.sr = (state_.sr | 0x2000) & ~std::uint16_t(0x8000);
-        branchActive_ = quickLongActive_ = returnActive_ = false;
+        branchActive_ = quickLongActive_ = returnActive_ = sccActive_ = false;
         controlOp_ = ControlOp::None;
         memoryOp_ = MemoryOp::None;
         traceInstruction_ = tracePending_ = false;
@@ -2214,6 +2214,48 @@ namespace R2MEGA::Core
         }
     }
 
+    void Moto68000::clockScc()
+    {
+        const unsigned programCode = state_.sr & 0x2000 ? 6 : 2;
+        const unsigned dataCode = state_.sr & 0x2000 ? 5 : 1;
+        if (sccLength_ == 2)
+        {
+            const bool fetch = sccStage_ == 2;
+            if (transfer(fetch ? state_.pc + 4 : sccAddress_, !fetch, sccStage_ == 1,
+                         sccValue_, fetch ? programCode : dataCode) != TransferResult::Complete)
+                return;
+            if (sccStage_ == 1 && sccMode_ == 3)
+                state_.address[sccReg_] += sccReg_ == 7 ? 2 : 1;
+            if (++sccStage_ == 3)
+            {
+                state_.prefetch = {sccNextOpcode_, pendingWord_};
+                state_.pc += 2;
+                ++state_.instructions;
+                sccActive_ = false;
+                tracePending_ = traceInstruction_;
+                traceInstruction_ = false;
+            }
+            return;
+        }
+        const std::uint32_t address = sccStage_ == 0 || sccStage_ == 2 ? sccAddress_
+                                                                       : state_.pc + (sccStage_ == 1 ? 4 : 6);
+        const bool write = sccStage_ == 2;
+        if (transfer(address, sccStage_ == 0 || write, write, sccValue_,
+                     sccStage_ == 0 || write ? dataCode : programCode) != TransferResult::Complete)
+            return;
+        if (sccStage_ == 1)
+            sccNextOpcode_ = pendingWord_;
+        if (++sccStage_ == 4)
+        {
+            state_.prefetch = {sccNextOpcode_, pendingWord_};
+            state_.pc += 4;
+            ++state_.instructions;
+            sccActive_ = false;
+            tracePending_ = traceInstruction_;
+            traceInstruction_ = false;
+        }
+    }
+
     void Moto68000::reset()
     {
         state_ = {};
@@ -2225,6 +2267,10 @@ namespace R2MEGA::Core
         pendingWord_ = 0;
         pins_ = {};
         branchActive_ = false;
+        sccActive_ = false;
+        sccStage_ = sccAddress_ = sccValue_ = sccNextOpcode_ = 0;
+        sccMode_ = sccReg_ = 0;
+        sccLength_ = 2;
         branchIdle_ = branchRead_ = 0;
         branchTarget_ = 0;
         branchReadsNeeded_ = branchIdleNeeded_ = 2;
@@ -2300,6 +2346,11 @@ namespace R2MEGA::Core
         if (returnActive_)
         {
             clockReturn();
+            return;
+        }
+        if (sccActive_)
+        {
+            clockScc();
             return;
         }
         if (controlOp_ != ControlOp::None)
@@ -2537,6 +2588,32 @@ namespace R2MEGA::Core
                 branchActive_ = true;
                 branchIdle_ = branchRead_ = 0;
             }
+            else if ((opcode & 0xf0c0) == 0x50c0)
+            {
+                const unsigned mode = (opcode >> 3) & 7, reg = opcode & 7;
+                if ((mode >= 2 && mode <= 6) || (mode == 7 && reg == 0))
+                {
+                    sccActive_ = true;
+                    sccStage_ = 0;
+                    sccMode_ = mode;
+                    sccReg_ = reg;
+                    sccLength_ = mode >= 5 ? 4 : 2;
+                    sccNextOpcode_ = sccLength_ == 2 ? state_.prefetch[1] : 0;
+                    if (mode == 4)
+                        state_.address[reg] -= reg == 7 ? 2 : 1;
+                    sccAddress_ = moveMemoryAddress(mode, reg, state_.address, state_.data,
+                                                    state_.prefetch[1], 0, state_.pc + 2);
+                    sccValue_ = branchCondition((opcode >> 8) & 15, state_.sr) ? 0xff : 0;
+                    clockScc();
+                    return;
+                }
+                if (mode != 0)
+                {
+                    beginException(4, state_.pc, false);
+                    bus_.observe(pins_);
+                    return;
+                }
+            }
             else if ((opcode & 0xf000) == 0x5000 && (opcode & 0x0038) == 0 &&
                      ((opcode >> 6) & 3) != 3)
             {
@@ -2616,13 +2693,19 @@ namespace R2MEGA::Core
                 return;
             }
             else if ((opcode & 0xf1f8) == 0x41e8 ||
+                     (opcode & 0xf1f8) == 0x41f0 ||
                      (opcode & 0xf1ff) == 0x41f8 ||
                      (opcode & 0xf1ff) == 0x41f9 ||
-                     (opcode & 0xf1ff) == 0x41fa)
+                     (opcode & 0xf1ff) == 0x41fa ||
+                     (opcode & 0xf1ff) == 0x41fb)
             {
                 memoryOp_ = MemoryOp::Lea;
                 memoryStage_ = 0;
                 memoryValue_ = 0;
+                memoryIdle_ = ((opcode >> 3) & 7) == 6 ||
+                                      (((opcode >> 3) & 7) == 7 && (opcode & 7) == 3)
+                                  ? 4
+                                  : 0;
             }
             else if ((opcode >> 12) >= 1 && (opcode >> 12) <= 3 &&
                      (((((opcode >> 6) & 7) == 0) && (((opcode >> 3) & 7) >= 2) &&
@@ -3326,27 +3409,26 @@ namespace R2MEGA::Core
         {
             if (memoryOp_ == MemoryOp::Lea)
             {
-                if ((opcode & 7) == 1 && memoryStage_ == 0)
+                const unsigned sourceMode = (opcode >> 3) & 7;
+                const bool absoluteLong = sourceMode == 7 && (opcode & 7) == 1;
+                if (absoluteLong && memoryStage_ == 0)
                 {
                     memoryValue_ = pendingWord_; // Segunda palavra do endereço absoluto longo.
                     ++memoryStage_;
                 }
                 else if (memoryStage_++ == 0)
                     memoryPrefetch_ = pendingWord_;
-                else if ((opcode & 7) == 1 && memoryStage_ == 2)
+                else if (absoluteLong && memoryStage_ == 2)
                     memoryPrefetch_ = pendingWord_;
                 else
                 {
                     const unsigned reg = (opcode >> 9) & 7;
-                    const int displacement = signedWord(state_.prefetch[1]);
-                    state_.address[reg] = ((opcode >> 3) & 7) == 5
-                                              ? state_.address[opcode & 7] + displacement
-                                          : (opcode & 7) == 1
-                                              ? (std::uint32_t(state_.prefetch[1]) << 16) | memoryValue_
-                                          : (opcode & 7) == 2 ? state_.pc + 2 + displacement
-                                                              : static_cast<std::uint32_t>(displacement);
+                    state_.address[reg] = moveMemoryAddress(sourceMode, opcode & 7,
+                                                            state_.address, state_.data,
+                                                            state_.prefetch[1], memoryValue_,
+                                                            state_.pc + 2);
                     state_.prefetch = {memoryPrefetch_, pendingWord_};
-                    state_.pc += (opcode & 7) == 1 ? 6 : 4;
+                    state_.pc += absoluteLong ? 6 : 4;
                     ++state_.instructions;
                     memoryOp_ = MemoryOp::None;
                 }
@@ -3437,6 +3519,12 @@ namespace R2MEGA::Core
                 // MOVEQ preserva X e atualiza N/Z; V e C são limpos.
                 state_.sr = (state_.sr & ~std::uint16_t(0x0f)) |
                             (value < 0 ? 0x08 : 0) | (value == 0 ? 0x04 : 0);
+            }
+            else if ((opcode & 0xf0c0) == 0x50c0)
+            {
+                const unsigned reg = opcode & 7;
+                const std::uint32_t value = branchCondition((opcode >> 8) & 15, state_.sr) ? 0xff : 0;
+                state_.data[reg] = (state_.data[reg] & 0xffffff00u) | value;
             }
             else if ((opcode & 0xf000) == 0x5000)
             {

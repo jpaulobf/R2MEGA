@@ -69,6 +69,7 @@ namespace R2MEGA::Core
         void clockMovep();
         void clockMovem();
         void clockStatusMove();
+        void clockScc();
         // A referência não é proprietária; o barramento deve sobreviver à CPU.
         M68KBus &bus_;
         State state_;
@@ -79,6 +80,12 @@ namespace R2MEGA::Core
         std::uint16_t pendingWord_ = 0;
         M68KPins pins_;
         bool branchActive_ = false;
+        bool sccActive_ = false;
+        unsigned sccStage_ = 0;
+        unsigned sccMode_ = 0, sccReg_ = 0, sccLength_ = 2;
+        std::uint32_t sccAddress_ = 0;
+        std::uint8_t sccValue_ = 0;
+        std::uint16_t sccNextOpcode_ = 0;
         unsigned branchIdle_ = 0;
         unsigned branchRead_ = 0;
         std::uint32_t branchTarget_ = 0;
