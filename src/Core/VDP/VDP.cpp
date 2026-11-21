@@ -33,12 +33,14 @@ namespace R2MEGA::Core
             verticalInterruptPending_ = true;
             verticalInterruptFlag_ = true;
         }
-        // Em H32, a área de 256 dots começa após os 860 clocks de blanking.
+        // A janela ativa usa dez clocks por pixel em H32 e oito em H40.
+        const auto cyclesPerDot = (registers_[12] & 1) ? h40MasterCyclesPerDot : masterCyclesPerDot;
         if (line_ < height && cycleInLine_ >= 860 &&
-            (cycleInLine_ - 860) % masterCyclesPerDot == 0)
+            (cycleInLine_ - 860) % cyclesPerDot == 0)
         {
-            const auto x = (cycleInLine_ - 860) / masterCyclesPerDot;
-            pixels_[line_ * width + x] = renderPixel(x, line_);
+            const auto x = (cycleInLine_ - 860) / cyclesPerDot;
+            if (x < visibleWidth())
+                pixels_[line_ * width + x] = renderPixel(x, line_);
         }
         if (++cycleInLine_ != masterCyclesPerLine)
             return;

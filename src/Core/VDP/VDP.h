@@ -9,12 +9,13 @@
 
 namespace R2MEGA::Core
 {
-    // Base temporal do VDP NTSC em H32, acionada a cada ciclo do clock mestre.
+    // Base temporal do VDP NTSC em H32 e H40, acionada a cada ciclo mestre.
     class VDP
     {
     public:
         static constexpr std::uint32_t masterCyclesPerLine = 3420;
         static constexpr std::uint32_t masterCyclesPerDot = 10;
+        static constexpr std::uint32_t h40MasterCyclesPerDot = 8;
         static constexpr std::uint32_t linesPerFrame = 262;
         static constexpr std::uint32_t visibleLines = 224;
         static constexpr std::uint32_t verticalInterruptCycle = 770;
@@ -23,7 +24,7 @@ namespace R2MEGA::Core
         void clock();
 
         std::uint32_t cycleInLine() const { return cycleInLine_; }
-        std::uint32_t dot() const { return cycleInLine_ / masterCyclesPerDot; }
+        std::uint32_t dot() const { return cycleInLine_ / ((registers_[12] & 1) ? h40MasterCyclesPerDot : masterCyclesPerDot); }
         std::uint32_t line() const { return line_; }
         std::uint64_t frame() const { return frame_; }
 
@@ -45,8 +46,10 @@ namespace R2MEGA::Core
         std::uint16_t cramWord(unsigned index) const { return cram_.read(index); }
         std::uint16_t vsramWord(unsigned index) const { return vsram_.read(index); }
         std::uint16_t dataAddress() const { return address_; }
-        static constexpr unsigned width = 256;
+        static constexpr unsigned h32Width = 256;
+        static constexpr unsigned width = 320;
         static constexpr unsigned height = visibleLines;
+        unsigned visibleWidth() const { return (registers_[12] & 1) ? width : h32Width; }
         const std::array<std::uint32_t, width * height> &pixels() const { return pixels_; }
 
     private:
