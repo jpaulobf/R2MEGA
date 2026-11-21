@@ -17,6 +17,7 @@ namespace R2MEGA::Core
         static constexpr std::uint32_t masterCyclesPerDot = 10;
         static constexpr std::uint32_t linesPerFrame = 262;
         static constexpr std::uint32_t visibleLines = 224;
+        static constexpr std::uint32_t verticalInterruptCycle = 770;
 
         void reset();
         void clock();
@@ -28,6 +29,9 @@ namespace R2MEGA::Core
 
         // Leitura da porta de controle em $C00004/$C00006.
         std::uint16_t readStatus();
+        // O pedido vertical permanece até o reconhecimento pelo 68000.
+        unsigned interruptLevel() const { return verticalInterruptPending_ && (registers_[1] & 0x20) ? 6 : 0; }
+        void acknowledgeInterrupt(unsigned level);
         std::uint16_t readData();
         void writeControl(std::uint16_t value);
         void writeData(std::uint16_t value);
@@ -67,6 +71,8 @@ namespace R2MEGA::Core
         std::uint32_t cycleInLine_ = 0;
         std::uint32_t line_ = 0;
         std::uint64_t frame_ = 0;
+        bool verticalInterruptPending_ = false;
+        bool verticalInterruptFlag_ = false;
         std::array<std::uint8_t, 24> registers_{};
         VRAM vram_;
         CRAM cram_;

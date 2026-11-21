@@ -9,6 +9,8 @@ namespace R2MEGA::Core
         cycleInLine_ = 0;
         line_ = 0;
         frame_ = 0;
+        verticalInterruptPending_ = false;
+        verticalInterruptFlag_ = false;
         registers_.fill(0);
         vram_.clear();
         cram_.clear();
@@ -26,6 +28,11 @@ namespace R2MEGA::Core
     void VDP::clock()
     {
         clockDma();
+        if (line_ == visibleLines && cycleInLine_ == verticalInterruptCycle)
+        {
+            verticalInterruptPending_ = true;
+            verticalInterruptFlag_ = true;
+        }
         // Em H32, a área de 256 dots começa após os 860 clocks de blanking.
         if (line_ < height && cycleInLine_ >= 860 &&
             (cycleInLine_ - 860) % masterCyclesPerDot == 0)
@@ -49,12 +56,21 @@ namespace R2MEGA::Core
         std::uint16_t status = 0x0200;
         if (dmaActive_ || dmaFillPending_)
             status |= 0x0002;
-        if (line_ >= visibleLines || !(registers_[1] & 0x40))
+        if (line_ >= visibleLines)
             status |= 0x0008; // VBlank.
         // Janela inicial H32; será ajustada junto ao contador HV e aos modos de vídeo.
         if (cycleInLine_ >= 280 && cycleInLine_ < 860)
             status |= 0x0004; // HBlank.
+        if (verticalInterruptFlag_)
+            status |= 0x0080;
+        verticalInterruptFlag_ = false;
         return status;
+    }
+
+    void VDP::acknowledgeInterrupt(unsigned level)
+    {
+        if (level == 6)
+            verticalInterruptPending_ = false;
     }
 
     VDP::PlanePixel VDP::planePixel(unsigned plane, unsigned x, unsigned y) const
