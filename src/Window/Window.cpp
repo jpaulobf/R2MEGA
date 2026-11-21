@@ -165,8 +165,8 @@ namespace R2MEGA::Window
             std::snprintf(counter, sizeof(counter), "Quadro: %llu  |  PC: $%06X",
                           static_cast<unsigned long long>(status.frame), status.pc);
             std::string message = counter;
-            message += videoWidth == 320 ? "\nVDP parcial: planos A/B em H40, sem sprites."
-                                         : "\nVDP parcial: planos A/B em H32, sem sprites.";
+            message += videoWidth == 320 ? "\nVDP parcial: planos A/B e sprites em H40."
+                                         : "\nVDP parcial: planos A/B e sprites em H32.";
             if (!status.displayEnabled)
                 message += "\nExibição da VDP ainda não ativada.";
             if (s.runningProvider && !s.runningProvider())
