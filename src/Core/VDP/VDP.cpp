@@ -12,6 +12,8 @@ namespace R2MEGA::Core
         frame_ = 0;
         verticalInterruptPending_ = false;
         verticalInterruptFlag_ = false;
+        horizontalInterruptPending_ = false;
+        horizontalInterruptCounter_ = 0;
         registers_.fill(0);
         vram_.clear();
         cram_.clear();
@@ -25,17 +27,31 @@ namespace R2MEGA::Core
         commandPending_ = false;
         dmaActive_ = false;
         dmaFillPending_ = false;
-        dmaRemaining_ = dmaSource_ = dmaAccumulator_ = 0;
+        dmaRemaining_ = dmaSource_ = dmaSlots_ = dmaQueued_ = 0;
+        dmaCopyByte_ = 0;
         dmaFillValue_ = 0;
+        fifo_.fill({});
+        fifoHead_ = fifoCount_ = 0;
     }
 
     void VDP::clock()
     {
-        clockDma();
+        if (externalAccessSlot())
+            clockAccessSlot();
         if (line_ == visibleLines && cycleInLine_ == verticalInterruptCycle)
         {
             verticalInterruptPending_ = true;
             verticalInterruptFlag_ = true;
+        }
+        if (line_ < visibleLines && cycleInLine_ == horizontalInterruptCycle)
+        {
+            if (horizontalInterruptCounter_ == 0)
+            {
+                horizontalInterruptPending_ = true;
+                horizontalInterruptCounter_ = registers_[10];
+            }
+            else
+                --horizontalInterruptCounter_;
         }
         // A janela ativa usa dez clocks por pixel em H32 e oito em H40.
         const auto cyclesPerDot = (registers_[12] & 1) ? h40MasterCyclesPerDot : masterCyclesPerDot;
@@ -57,13 +73,14 @@ namespace R2MEGA::Core
             return;
         line_ = 0;
         ++frame_;
+        horizontalInterruptCounter_ = registers_[10];
     }
 
     std::uint16_t VDP::readStatus()
     {
         commandPending_ = false;
-        // O FIFO está vazio enquanto as portas de escrita ainda não existem.
-        std::uint16_t status = 0x0200;
+        std::uint16_t status = fifoCount_ == 0 ? 0x0200 : fifoCount_ == fifo_.size() ? 0x0100
+                                                                                     : 0;
         if (dmaActive_ || dmaFillPending_)
             status |= 0x0002;
         if (line_ >= visibleLines)
@@ -83,10 +100,25 @@ namespace R2MEGA::Core
         return status;
     }
 
+    std::uint16_t VDP::readHvCounter() const
+    {
+        // No NTSC de 224 linhas, V recua de $EA para $E5 no fim do quadro.
+        const unsigned vertical = line_ <= 0xea ? line_ : 0xe5 + line_ - 0xeb;
+        const bool h40 = (registers_[12] & 1) != 0;
+        const unsigned firstRange = h40 ? 0xb7 : 0x94;
+        const unsigned secondRange = h40 ? 0xe4 : 0xe9;
+        const unsigned ticksPerLine = firstRange + 0x100 - secondRange;
+        const unsigned tick = cycleInLine_ * ticksPerLine / masterCyclesPerLine;
+        const unsigned horizontal = tick < firstRange ? tick : secondRange + tick - firstRange;
+        return std::uint16_t((vertical << 8) | horizontal);
+    }
+
     void VDP::acknowledgeInterrupt(unsigned level)
     {
         if (level == 6)
             verticalInterruptPending_ = false;
+        else if (level == 4)
+            horizontalInterruptPending_ = false;
     }
 
     VDP::PlanePixel VDP::planePixel(unsigned plane, unsigned x, unsigned y) const
@@ -125,7 +157,35 @@ namespace R2MEGA::Core
         return {std::uint8_t(((attribute >> 9) & 0x30) | color), (attribute & 0x8000) != 0};
     }
 
-    std::uint16_t VDP::spriteWord(unsigned address) const
+    bool VDP::windowVisible(unsigned x, unsigned y) const
+    {
+        const unsigned horizontalBoundary = (registers_[17] & 0x1f) * 16;
+        const unsigned verticalBoundary = (registers_[18] & 0x1f) * 8;
+        const bool horizontal = (registers_[17] & 0x80) ? x >= horizontalBoundary
+                                                        : x < horizontalBoundary;
+        const bool vertical = (registers_[18] & 0x80) ? y >= verticalBoundary
+                                                      : y < verticalBoundary;
+        return horizontal || vertical;
+    }
+
+    VDP::PlanePixel VDP::windowPixel(unsigned x, unsigned y) const
+    {
+        const bool h40 = (registers_[12] & 1) != 0;
+        const unsigned base = unsigned(registers_[3] & (h40 ? 0x3c : 0x3e)) << 10;
+        const unsigned cellsWide = h40 ? 64 : 32;
+        const auto entryAddress = std::uint16_t(base + 2 * ((y >> 3) * cellsWide + (x >> 3)));
+        const auto attribute = vramWord(entryAddress);
+        const unsigned tileX = (attribute & 0x0800) ? 7 - (x & 7) : x & 7;
+        const unsigned tileY = (attribute & 0x1000) ? 7 - (y & 7) : y & 7;
+        const auto patternAddress = std::uint16_t((attribute & 0x07ff) * 32 + tileY * 4 + (tileX >> 1));
+        const auto pattern = vram_.read(patternAddress);
+        const unsigned color = (tileX & 1) ? pattern & 15 : pattern >> 4;
+        if (color == 0)
+            return {};
+        return {std::uint8_t(((attribute >> 9) & 0x30) | color), (attribute & 0x8000) != 0};
+    }
+
+    std::uint16_t VDP::vramWord(unsigned address) const
     {
         return std::uint16_t((unsigned(vram_.read(std::uint16_t(address))) << 8) |
                              vram_.read(std::uint16_t(address + 1)));
@@ -148,10 +208,10 @@ namespace R2MEGA::Core
         for (unsigned visited = 0; visited < maxSprites; ++visited)
         {
             const unsigned entry = base + link * 8;
-            const unsigned positionY = spriteWord(entry) & 0x1ff;
-            const unsigned sizeAndLink = spriteWord(entry + 2);
-            const unsigned attribute = spriteWord(entry + 4);
-            const unsigned positionX = spriteWord(entry + 6) & 0x1ff;
+            const unsigned positionY = vramWord(entry) & 0x1ff;
+            const unsigned sizeAndLink = vramWord(entry + 2);
+            const unsigned attribute = vramWord(entry + 4);
+            const unsigned positionX = vramWord(entry + 6) & 0x1ff;
             const unsigned tilesWide = ((sizeAndLink >> 10) & 3) + 1;
             const unsigned tilesHigh = ((sizeAndLink >> 8) & 3) + 1;
             const unsigned localY = (y + 128 - positionY) & 0x1ff;
@@ -208,7 +268,8 @@ namespace R2MEGA::Core
     {
         if (!(registers_[1] & 0x40))
             return backdropColor();
-        const auto a = planePixel(0, x, y);
+        // A janela substitui o plano A inclusive nos pixels transparentes.
+        const auto a = windowVisible(x, y) ? windowPixel(x, y) : planePixel(0, x, y);
         const auto b = planePixel(1, x, y);
         const auto sprite = spriteLine_[x];
         // Ordem do modo 5: sprites altos, A alta, B alta, sprites baixos, A baixa e B baixa.
@@ -274,28 +335,7 @@ namespace R2MEGA::Core
     {
         commandPending_ = false;
         const bool startFill = dmaFillPending_;
-        switch (code_ & 0x0f)
-        {
-        case 1:
-        {
-            const auto aligned = address_ & 0xfffe;
-            if (address_ & 1)
-                value = std::uint16_t((value << 8) | (value >> 8));
-            vram_.write(aligned, std::uint8_t(value >> 8));
-            vram_.write(aligned + 1, std::uint8_t(value));
-            break;
-        }
-        case 3:
-            cram_.write((address_ >> 1) & 0x3f, value & 0x0eee);
-            break;
-        case 5:
-            if (((address_ & 0x7e) >> 1) >= VSRAM::size())
-                throw std::logic_error("Endereço de VSRAM fora da área física");
-            vsram_.write((address_ & 0x7e) >> 1, value & 0x07ff);
-            break;
-        default:
-            throw std::logic_error("Modo de escrita de dados do VDP ainda não implementado");
-        }
+        writeDataAt(address_, code_, value);
         address_ = std::uint16_t(address_ + registers_[15]);
         if (startFill)
         {
@@ -303,6 +343,119 @@ namespace R2MEGA::Core
             dmaFillValue_ = value;
             startDma(DmaMode::Fill);
         }
+    }
+
+    bool VDP::tryWriteData(std::uint16_t value)
+    {
+        if (dmaFillPending_)
+        {
+            writeData(value);
+            return true;
+        }
+        if (fifoCount_ == fifo_.size())
+            return false;
+        const auto mode = code_ & 0x0f;
+        if (mode != 1 && mode != 3 && mode != 5)
+            throw std::logic_error("Modo de escrita de dados do VDP ainda não implementado");
+        if (mode == 5 && ((address_ & 0x7e) >> 1) >= VSRAM::size())
+            throw std::logic_error("Endereço de VSRAM fora da área física");
+        fifo_[(fifoHead_ + fifoCount_) % fifo_.size()] = {address_, value, code_, std::uint8_t(mode == 1 ? 2 : 1), false};
+        ++fifoCount_;
+        address_ = std::uint16_t(address_ + registers_[15]);
+        commandPending_ = false;
+        return true;
+    }
+
+    void VDP::writeDataAt(std::uint16_t address, std::uint8_t code, std::uint16_t value)
+    {
+        switch (code & 0x0f)
+        {
+        case 1:
+        {
+            const auto aligned = address & 0xfffe;
+            if (address & 1)
+                value = std::uint16_t((value << 8) | (value >> 8));
+            vram_.write(aligned, std::uint8_t(value >> 8));
+            vram_.write(aligned + 1, std::uint8_t(value));
+            break;
+        }
+        case 3:
+            cram_.write((address >> 1) & 0x3f, value & 0x0eee);
+            break;
+        case 5:
+            if (((address & 0x7e) >> 1) >= VSRAM::size())
+                throw std::logic_error("Endereço de VSRAM fora da área física");
+            vsram_.write((address & 0x7e) >> 1, value & 0x07ff);
+            break;
+        default:
+            throw std::logic_error("Modo de escrita de dados do VDP ainda não implementado");
+        }
+    }
+
+    bool VDP::externalAccessSlot()
+    {
+        const bool h40 = (registers_[12] & 1) != 0;
+        if (line_ < visibleLines && (registers_[1] & 0x40))
+        {
+            // Posições em clocks mestres medidas para os slots externos do modo 5.
+            // Fonte: Genesis Plus GX, core/vdp_ctrl.c, fifo_timing_h32/h40.
+            static constexpr std::array<unsigned, 16> h32{
+                230, 510, 810, 970, 1130, 1450, 1610, 1770,
+                2090, 2250, 2410, 2730, 2890, 3050, 3350, 3370};
+            static constexpr std::array<unsigned, 18> h40Slots{
+                352, 820, 948, 1076, 1332, 1460, 1588, 1844, 1972,
+                2100, 2356, 2484, 2612, 2868, 2996, 3124, 3364, 3380};
+            return h40 ? std::binary_search(h40Slots.begin(), h40Slots.end(), cycleInLine_)
+                       : std::binary_search(h32.begin(), h32.end(), cycleInLine_);
+        }
+
+        if (!h40)
+        {
+            // Em H32, quatro clocks seriais formam um acesso de 20 clocks mestres.
+            // A fase dos quatro refreshes em branco ainda é uma estimativa.
+            if (cycleInLine_ % 20 != 10)
+                return false;
+            const unsigned slot = cycleInLine_ / 20;
+            return slot != 31 && slot != 63 && slot != 95 && slot != 127;
+        }
+
+        // H40 alterna os divisores do clock na região de sincronismo. A fase
+        // dos slots e refreshes em branco ainda precisa de medição; preservamos
+        // 210 slots por linha e os cinco ciclos reservados ao refresh da VRAM.
+        const unsigned next = (cycleInLine_ + 1) * 210 / masterCyclesPerLine;
+        if (next == cycleInLine_ * 210 / masterCyclesPerLine)
+            return false;
+        const unsigned slot = next - 1;
+        return slot != 41 && slot != 83 && slot != 125 && slot != 167 && slot != 209;
+    }
+
+    void VDP::clockAccessSlot()
+    {
+        // A FIFO drena antes de um novo pedido de DMA. Um slot nunca atende
+        // duas operações de VRAM/CRAM/VSRAM.
+        const bool fifoOccupied = fifoCount_ != 0;
+        if (fifoOccupied)
+            clockFifo();
+        else if (dmaActive_ && dmaMode_ != DmaMode::Bus)
+            clockDma();
+
+        // A DMA pelo barramento lê uma palavra e a coloca na mesma FIFO.
+        // A leitura pode ocorrer enquanto o slot drena a entrada anterior.
+        if (dmaActive_ && dmaMode_ == DmaMode::Bus && dmaRemaining_ && fifoCount_ < fifo_.size())
+            queueDmaWord();
+    }
+
+    void VDP::clockFifo()
+    {
+        auto &entry = fifo_[fifoHead_];
+        if (--entry.slots)
+            return;
+        writeDataAt(entry.address, entry.code, entry.value);
+        const bool fromDma = entry.dma;
+        fifoHead_ = (fifoHead_ + 1) % fifo_.size();
+        --fifoCount_;
+        if (fromDma && --dmaQueued_ == 0 && dmaRemaining_ == 0)
+            finishDma();
     }
 
     std::uint16_t VDP::readData()
@@ -353,30 +506,50 @@ namespace R2MEGA::Core
         dmaSource_ = mode == DmaMode::Bus
                          ? (std::uint32_t(registers_[23] & 0x7f) << 17) | (source << 1)
                          : source;
-        dmaAccumulator_ = 0;
+        dmaSlots_ = mode == DmaMode::Fill ? 2 : 0;
+        dmaQueued_ = 0;
+        dmaCopyByte_ = 0;
         dmaActive_ = true;
+    }
+
+    void VDP::queueDmaWord()
+    {
+        const auto value = dmaReader_(dmaSource_);
+        const auto mode = code_ & 0x0f;
+        fifo_[(fifoHead_ + fifoCount_) % fifo_.size()] =
+            {address_, value, code_, std::uint8_t(mode == 1 ? 2 : 1), true};
+        ++fifoCount_;
+        ++dmaQueued_;
+        address_ = std::uint16_t(address_ + registers_[15]);
+        dmaSource_ = (dmaSource_ & 0xfe0000u) | ((dmaSource_ + 2) & 0x1ffffu);
+        --dmaRemaining_;
+        registers_[19] = std::uint8_t(dmaRemaining_);
+        registers_[20] = std::uint8_t(dmaRemaining_ >> 8);
     }
 
     void VDP::clockDma()
     {
-        if (!dmaActive_)
+        // O preenchimento espera dois slots após a escrita inicial.
+        if (dmaMode_ == DmaMode::Fill && dmaSlots_ != 0)
+        {
+            --dmaSlots_;
             return;
-        const bool blank = line_ >= visibleLines || !(registers_[1] & 0x40);
-        const bool h40 = (registers_[12] & 1) != 0;
-        // Distribui a taxa média de acessos por linha; os slots exatos virão com o FIFO.
-        unsigned rate = 0;
-        if (dmaMode_ == DmaMode::Fill)
-            rate = blank ? (h40 ? 203 : 165) : (h40 ? 17 : 15);
-        else if (dmaMode_ == DmaMode::Copy || (code_ & 0x0f) == 1)
-            rate = blank ? (h40 ? 102 : 83) : (h40 ? 9 : 8);
+        }
+        if (dmaMode_ == DmaMode::Copy)
+        {
+            // A leitura ocupa o primeiro slot; a escrita ocorre no segundo.
+            if (dmaSlots_ == 0)
+            {
+                dmaCopyByte_ = vram_.read(dmaSource_ & 0xffff);
+                dmaSlots_ = 1;
+                return;
+            }
+            dmaSlots_ = 0;
+            vram_.write(address_, dmaCopyByte_);
+            dmaSource_ = (dmaSource_ + 1) & 0xffff;
+            address_ = std::uint16_t(address_ + registers_[15]);
+        }
         else
-            rate = blank ? (h40 ? 198 : 161) : (h40 ? 18 : 16);
-        dmaAccumulator_ += rate;
-        if (dmaAccumulator_ < masterCyclesPerLine)
-            return;
-        dmaAccumulator_ -= masterCyclesPerLine;
-
-        if (dmaMode_ == DmaMode::Fill)
         {
             if ((code_ & 0x0f) == 1)
             {
@@ -385,17 +558,6 @@ namespace R2MEGA::Core
             }
             else
                 writeData(dmaFillValue_);
-        }
-        else if (dmaMode_ == DmaMode::Copy)
-        {
-            vram_.write(address_, vram_.read(dmaSource_ & 0xffff));
-            dmaSource_ = (dmaSource_ + 1) & 0xffff;
-            address_ = std::uint16_t(address_ + registers_[15]);
-        }
-        else
-        {
-            writeData(dmaReader_(dmaSource_));
-            dmaSource_ = (dmaSource_ & 0xfe0000u) | ((dmaSource_ + 2) & 0x1ffffu);
         }
         --dmaRemaining_;
         registers_[19] = std::uint8_t(dmaRemaining_);
