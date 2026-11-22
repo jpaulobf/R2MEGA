@@ -22,10 +22,36 @@ namespace R2MEGA::Window
         // Dados de execução mostrados junto ao quadro da VDP.
         struct VideoStatus
         {
+            struct BusAccess
+            {
+                std::uint32_t address = 0;
+                std::uint16_t data = 0;
+                unsigned functionCode = 0;
+                bool valid = false;
+                bool write = false;
+                bool byte = false;
+                bool dataValid = false;
+            };
+            struct CpuException
+            {
+                std::uint64_t frame = 0;
+                std::uint32_t pc = 0;
+                std::uint32_t address = 0;
+                std::uint16_t opcode = 0;
+                unsigned vector = 0;
+                bool valid = false;
+                bool addressValid = false;
+            };
             std::uint64_t frame = 0;
             std::uint32_t pc = 0;
+            std::uint16_t opcode = 0;
+            std::uint16_t sr = 0;
+            std::uint32_t line = 0;
             unsigned width = 256;
             bool displayEnabled = false;
+            bool paused = false;
+            BusAccess busAccess;
+            CpuException exception;
             std::string error;
         };
         using VideoStatusProvider = std::function<VideoStatus()>;
@@ -36,9 +62,15 @@ namespace R2MEGA::Window
             std::function<bool(unsigned)> playerUsesJoystick;
             std::function<void(unsigned, bool)> setPlayerJoystick;
         };
+        struct EmulationCallbacks
+        {
+            std::function<void()> togglePause;
+            std::function<bool()> isPaused;
+        };
 
         explicit Window(OpenHandler openHandler = {}, VideoProvider videoProvider = {}, RunningProvider runningProvider = {},
-                        VideoStatusProvider videoStatusProvider = {}, InputCallbacks inputCallbacks = {});
+                        VideoStatusProvider videoStatusProvider = {}, InputCallbacks inputCallbacks = {},
+                        EmulationCallbacks emulationCallbacks = {});
 
         ~Window();
 

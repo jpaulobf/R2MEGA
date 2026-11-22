@@ -26,15 +26,17 @@ namespace R2MEGA::Window
         RunningProvider runningProvider;
         VideoStatusProvider videoStatusProvider;
         InputCallbacks inputCallbacks;
+        EmulationCallbacks emulationCallbacks;
         FileManager files;
         KeyboardConfig keyboardConfig;
         KeyboardDialog keyboardDialog;
         bool focused = false, minimized = false;
         explicit Impl(OpenHandler handler, VideoProvider video,
-                      RunningProvider running, VideoStatusProvider status, InputCallbacks input)
+                      RunningProvider running, VideoStatusProvider status, InputCallbacks input,
+                      EmulationCallbacks emulation)
             : openHandler(std::move(handler)), videoProvider(std::move(video)),
               runningProvider(std::move(running)), videoStatusProvider(std::move(status)),
-              inputCallbacks(std::move(input)),
+              inputCallbacks(std::move(input)), emulationCallbacks(std::move(emulation)),
               files([this](const std::filesystem::path &path)
                     {
                 if (!openHandler) throw std::runtime_error("ROM loading is unavailable.");
@@ -62,9 +64,10 @@ namespace R2MEGA::Window
 
     Window::Window(OpenHandler openHandler, VideoProvider videoProvider,
                    RunningProvider runningProvider, VideoStatusProvider videoStatusProvider,
-                   InputCallbacks inputCallbacks)
+                   InputCallbacks inputCallbacks, EmulationCallbacks emulationCallbacks)
         : impl_(std::make_unique<Impl>(std::move(openHandler), std::move(videoProvider), std::move(runningProvider),
-                                       std::move(videoStatusProvider), std::move(inputCallbacks))) {}
+                                       std::move(videoStatusProvider), std::move(inputCallbacks),
+                                       std::move(emulationCallbacks))) {}
     Window::~Window() = default;
 
     void Window::open()
@@ -141,6 +144,9 @@ namespace R2MEGA::Window
                 !event.key.repeat && event.key.key == SDLK_O && (event.key.mod & SDL_KMOD_CTRL) && !s.files.isOpen() &&
                 !s.aboutOpen)
                 s.files.requestOpen();
+            if (event.type == SDL_EVENT_KEY_DOWN && event.key.windowID == SDL_GetWindowID(s.window) &&
+                !event.key.repeat && event.key.key == SDLK_PAUSE && s.emulationCallbacks.togglePause)
+                s.emulationCallbacks.togglePause();
             const bool keyEvent = event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP;
             if (s.inputCallbacks.event && (!keyEvent || event.key.windowID == SDL_GetWindowID(s.window)))
                 s.inputCallbacks.event(event, acceptsInput());
@@ -152,7 +158,8 @@ namespace R2MEGA::Window
     {
         const auto &s = *impl_;
         if (!s.contextReady || !s.running || !s.focused || s.minimized || s.files.isOpen() ||
-            s.keyboardDialog.active() || s.aboutOpen)
+            s.keyboardDialog.active() || s.aboutOpen ||
+            (s.emulationCallbacks.isPaused && s.emulationCallbacks.isPaused()))
             return false;
         const auto &io = ImGui::GetIO();
         return !io.WantCaptureKeyboard && !io.WantTextInput &&
@@ -223,20 +230,67 @@ namespace R2MEGA::Window
             std::snprintf(counter, sizeof(counter), "Quadro: %llu  |  PC: $%06X",
                           static_cast<unsigned long long>(status.frame), status.pc);
             std::string message = counter;
-            message += videoWidth == 320 ? "\nVDP parcial: planos A/B e sprites em H40."
-                                         : "\nVDP parcial: planos A/B e sprites em H32.";
+            char details[96];
+            std::snprintf(details, sizeof(details), "\nOpcode: $%04X  |  SR: $%04X  |  Linha VDP: %u",
+                          unsigned(status.opcode), unsigned(status.sr), unsigned(status.line));
+            message += details;
+            if (status.busAccess.valid)
+            {
+                char access[128];
+                std::snprintf(access, sizeof(access),
+                              "\nÚltimo M68000: %s %s $%06X  |  FC: %u",
+                              status.busAccess.write ? "escrita" : "leitura",
+                              status.busAccess.byte ? "byte" : "word",
+                              unsigned(status.busAccess.address), status.busAccess.functionCode);
+                message += access;
+                if (status.busAccess.dataValid)
+                {
+                    char data[32];
+                    std::snprintf(data, sizeof(data), "  |  dado: $%04X", unsigned(status.busAccess.data));
+                    message += data;
+                }
+            }
+            message += videoWidth == 320 ? "\nVDP parcial: planos A/B, janela e sprites em H40."
+                                         : "\nVDP parcial: planos A/B, janela e sprites em H32.";
             if (!status.displayEnabled)
                 message += "\nExibição da VDP ainda não ativada.";
-            if (s.runningProvider && !s.runningProvider())
+            if (status.paused)
+                message += "\nEMULAÇÃO PAUSADA (Pause/Break para continuar)";
+            if (status.exception.valid)
             {
-                message += "\nEmulação pausada.";
+                const char *name = status.exception.vector == 2   ? "erro de barramento"
+                                   : status.exception.vector == 3 ? "erro de endereço"
+                                                                  : "instrução ilegal";
+                char fault[160];
+                std::snprintf(fault, sizeof(fault),
+                              "\nPRIMEIRA EXCEÇÃO: vetor %u (%s), quadro %llu"
+                              "\nOrigem: PC $%06X  |  opcode $%04X",
+                              status.exception.vector, name,
+                              static_cast<unsigned long long>(status.exception.frame),
+                              unsigned(status.exception.pc), unsigned(status.exception.opcode));
+                message += fault;
+                if (status.exception.addressValid)
+                {
+                    char address[48];
+                    std::snprintf(address, sizeof(address), "  |  endereço $%06X",
+                                  unsigned(status.exception.address));
+                    message += address;
+                }
+            }
+            const bool stopped = (s.runningProvider && !s.runningProvider()) || !status.error.empty();
+            if (stopped)
+            {
+                message += "\nEMULAÇÃO INTERROMPIDA";
                 if (!status.error.empty())
-                    message += " " + status.error;
+                    message += "\nMotivo: " + status.error;
             }
             const float wrapWidth = std::max(1.0f, viewport->WorkSize.x - 40.0f);
             const auto textSize = ImGui::CalcTextSize(message.c_str(), nullptr, false, wrapWidth);
             const ImVec2 position(viewport->WorkPos.x + 12.0f, viewport->WorkPos.y + 12.0f);
             background->AddRectFilled(position, ImVec2(position.x + std::min(wrapWidth, textSize.x) + 16.0f, position.y + textSize.y + 16.0f), IM_COL32(0, 0, 0, 210), 5.0f);
+            if (stopped || status.exception.valid)
+                background->AddRect(position, ImVec2(position.x + std::min(wrapWidth, textSize.x) + 16.0f, position.y + textSize.y + 16.0f),
+                                    IM_COL32(255, 90, 90, 255), 5.0f, 0, 2.0f);
             background->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
                                 ImVec2(position.x + 8.0f, position.y + 8.0f), IM_COL32_WHITE,
                                 message.c_str(), nullptr, wrapWidth);
