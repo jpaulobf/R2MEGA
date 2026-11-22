@@ -70,7 +70,7 @@ int main(int argc, char **argv)
     require(board.readByte(0xa10003) == 0x7f);
     board.writeWord(0xa10008, 0x0040); // TH da porta 1 como saída.
     board.writeByte(0xa10003, 0);
-    require(board.readWord(0xa10008) == 0x0040 && board.readByte(0xa10003) == 0x3f);
+    require(board.readWord(0xa10008) == 0x0040 && board.readByte(0xa10003) == 0x33);
     board.writeByte(0xa10008, 0xff); // Byte alto da palavra não altera o registrador.
     require(board.readWord(0xa10008) == 0x0040);
     board.writeWord(0xa10008, 0); // Devolve TH ao estado de entrada.

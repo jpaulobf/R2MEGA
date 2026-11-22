@@ -1,4 +1,5 @@
 #include "Window/Window.h"
+#include "Systems/Input.h"
 #include <SDL3/SDL.h>
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -129,6 +130,62 @@ namespace
         require(!video || !video->Active, "VDP must not open a secondary window");
     }
 
+    void testInputMenu()
+    {
+        bool joystick[2]{};
+        R2MEGA::Window::Window::InputCallbacks input;
+        input.playerUsesJoystick = [&](unsigned player)
+        { return joystick[player]; };
+        input.setPlayerJoystick = [&](unsigned player, bool enabled)
+        { joystick[player] = enabled; };
+        R2MEGA::Window::Window window({}, {}, {}, {}, std::move(input));
+        window.open();
+        window.processEvents();
+        activateMenu(window, "Configure Keyboard...", "Input");
+        auto *popup = ImGui::FindWindowByName("Configure Keyboard");
+        require(popup && popup->Active, "Input menu must open the keyboard dialog");
+        require(!window.acceptsInput(), "Keyboard dialog must block game input");
+        ImGui::ActivateItemByID(popup->GetID("Cancel"));
+        window.render();
+        window.render();
+        require(!popup->Active, "Cancel must close the keyboard dialog");
+    }
+
+    void testKeyboardToWindow()
+    {
+        R2MEGA::Systems::Input input;
+        R2MEGA::Window::Window::InputCallbacks callbacks;
+        callbacks.event = [&](const SDL_Event &event, bool enabled)
+        { input.handleEvent(event, enabled); };
+        callbacks.setKeyboardMapping = [&](const R2MEGA::Systems::KeyboardMapping &mapping)
+        { input.setKeyboardMapping(mapping); };
+        R2MEGA::Window::Window window({}, {}, {}, {}, std::move(callbacks));
+        window.open();
+        window.render();
+        int count = 0;
+        SDL_Window **windows = SDL_GetWindows(&count);
+        require(windows && count == 1, "Expected one SDL window for input");
+        const auto id = SDL_GetWindowID(windows[0]);
+        SDL_free(windows);
+        SDL_Event focus{};
+        focus.type = SDL_EVENT_WINDOW_FOCUS_GAINED;
+        focus.window.windowID = id;
+        require(SDL_PushEvent(&focus), "Could not queue focus event");
+        SDL_Event key{};
+        key.type = SDL_EVENT_KEY_DOWN;
+        key.key.windowID = id;
+        key.key.key = SDLK_J;
+        require(SDL_PushEvent(&key), "Could not queue player key");
+        window.processEvents();
+        require(input.update(window.acceptsInput())[0] == R2MEGA::Core::ControllerInput::A,
+                "Window must pass the configured key to player one");
+        focus.type = SDL_EVENT_WINDOW_FOCUS_LOST;
+        require(SDL_PushEvent(&focus), "Could not queue focus loss");
+        window.processEvents();
+        require(input.update(window.acceptsInput())[0] == 0,
+                "Focus loss must release the game button");
+    }
+
     void testShortcutAndClose()
     {
         R2MEGA::Window::Window window;
@@ -175,6 +232,8 @@ int main()
         testAbout();
         testRomSelection();
         testVideoOutput();
+        testInputMenu();
+        testKeyboardToWindow();
     }
     catch (const std::exception &error)
     {
