@@ -1,4 +1,5 @@
 #include "Systems/Engine.h"
+#include "Systems/Input.h"
 #include "Window/Window.h"
 #include "Core/Cartridge/Cartridge.h"
 #include "Core/Board.h"
@@ -16,8 +17,18 @@ namespace R2MEGA::Systems
         {
             std::optional<Core::Cartridge> cartridge;
             Core::Board board;
+            Input input;
             bool running = false;
             std::string lastError;
+            Window::Window::InputCallbacks inputCallbacks;
+            inputCallbacks.event = [&input](const SDL_Event &event, bool enabled)
+            { input.handleEvent(event, enabled); };
+            inputCallbacks.setKeyboardMapping = [&input](const KeyboardMapping &mapping)
+            { input.setKeyboardMapping(mapping); };
+            inputCallbacks.playerUsesJoystick = [&input](unsigned player)
+            { return input.playerUsesJoystick(player); };
+            inputCallbacks.setPlayerJoystick = [&input](unsigned player, bool enabled)
+            { input.setPlayerJoystick(player, enabled); };
             Window::Window window([&cartridge, &board, &running, &lastError](const std::filesystem::path &path)
                                   {
                 auto loaded = Core::Cartridge::load(path);
@@ -37,8 +48,10 @@ namespace R2MEGA::Systems
                 status.width = board.vdp().visibleWidth();
                 status.displayEnabled = (board.vdp().registerValue(1) & 0x40) != 0;
                 status.error = lastError;
-                return status; });
+                return status; }, std::move(inputCallbacks));
             window.open();
+            if (!input.initialize())
+                std::cerr << "R2MEGA: gamepads indisponíveis: " << SDL_GetError() << '\n';
             constexpr double masterClock = 53693175.0;
             // Limita a recuperação após pausas longas para manter a janela responsiva.
             constexpr double maxCyclesPerUpdate = masterClock / 30.0;
@@ -46,6 +59,9 @@ namespace R2MEGA::Systems
             double cycleBudget = 0;
             while (window.processEvents())
             {
+                const auto buttons = input.update(window.acceptsInput());
+                for (unsigned player = 0; player < buttons.size(); ++player)
+                    board.setControllerButtons(player, buttons[player]);
                 const auto now = std::chrono::steady_clock::now();
                 const double elapsed = std::chrono::duration<double>(now - previousTime).count();
                 previousTime = now;
@@ -72,6 +88,7 @@ namespace R2MEGA::Systems
                     cycleBudget = 0;
                 window.render();
             }
+            input.shutdown();
             return 0;
         }
         catch (const std::exception &error)
