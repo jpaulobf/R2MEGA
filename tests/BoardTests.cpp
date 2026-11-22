@@ -58,6 +58,36 @@ int main(int argc, char **argv)
     require(board.readWord(0xc00004) == 0x0200);
     require(board.readWord(0xc00006) == 0x0200);
     require(board.readByte(0xc00004) == 0x02 && board.readByte(0xc00005) == 0);
+    {
+        auto counterBoard = std::make_unique<Board>();
+        require(counterBoard->readWord(0xc00008) == 0);
+        for (unsigned i = 0; i < 20; ++i)
+            counterBoard->clock();
+        require(counterBoard->readWord(0xc00008) == 1 &&
+                counterBoard->readByte(0xc00008) == 0 &&
+                counterBoard->readByte(0xc00009) == 1);
+        counterBoard->writeWord(0xc00004, 0x8f02);
+        counterBoard->writeWord(0xc00004, 0x4000);
+        counterBoard->writeWord(0xc00004, 0);
+        for (unsigned i = 0; i < 4; ++i)
+            require(counterBoard->tryWriteWord(0xc00000, std::uint16_t(0x2000 + i)));
+        require(!counterBoard->tryWriteWord(0xc00000, 0x9999));
+        require((counterBoard->readWord(0xc00004) & 0x0300) == 0x0100);
+        while ((counterBoard->readWord(0xc00004) & 0x0100) != 0)
+            counterBoard->clock();
+        require(counterBoard->tryWriteWord(0xc00000, 0x2004));
+    }
+    {
+        auto interruptBoard = std::make_unique<Board>();
+        interruptBoard->writeWord(0xc00004, 0x8010); // IE1 solicita H-INT de nível 4.
+        for (unsigned i = 0; i <= VDP::horizontalInterruptCycle; ++i)
+            interruptBoard->clock();
+        require(interruptBoard->vdp().interruptLevel() == 4);
+        M68KInterruptResponse response;
+        require(interruptBoard->tryAcknowledgeInterrupt(4, response));
+        require(response.kind == M68KInterruptResponse::Kind::Autovector &&
+                interruptBoard->vdp().interruptLevel() == 0);
+    }
     board.writeWord(0xc00004, 0x8f02); // Incremento automático de dois bytes.
     board.writeWord(0xc00004, 0xc000); // Endereço zero da CRAM.
     board.writeWord(0xc00006, 0x0000);

@@ -280,6 +280,62 @@ namespace
                 }
     }
 
+    void testSetCases()
+    {
+        for (const auto [initial, expectedFlags] :
+             {std::pair<std::uint16_t, unsigned>{0x7000, 0x04},
+              std::pair<std::uint16_t, unsigned>{0x7080, 0x08}})
+        {
+            Bus bus;
+            bus.setup();
+            bus.putWord(0x100, initial);
+            bus.putWord(0x102, 0x4ac0); // TAS D0.
+            Moto68000 cpu(bus);
+            boot(cpu);
+            execute(cpu);
+            check(execute(cpu) == 4 && (cpu.state().data[0] & 0xff) == 0x80 &&
+                      (cpu.state().sr & 0x0f) == expectedFlags,
+                  "TAS Dn testa o valor original e ajusta o bit 7");
+        }
+
+        Bus memory;
+        memory.setup();
+        memory.putWord(0x100, 0x41f8); // LEA $1100,A0.
+        memory.putWord(0x102, 0x1100);
+        memory.putWord(0x104, 0x4ad0); // TAS (A0).
+        memory.bytes[0x1100] = 0;
+        Moto68000 memoryCpu(memory);
+        boot(memoryCpu);
+        execute(memoryCpu);
+        memory.transfers.clear();
+        check(execute(memoryCpu) == 14 && memory.byte(0x1100) == 0x80 &&
+                  (memoryCpu.state().sr & 0x0f) == 0x04,
+              "TAS em memória lê e modifica um byte");
+        check(memory.transfers ==
+                  std::vector<std::pair<char, std::uint32_t>>({{'r', 0x1100}, {'w', 0x1100}, {'R', 0x108}}),
+              "TAS mantém leitura e escrita juntas antes da pré-busca");
+
+        Bus stack;
+        stack.setup();
+        stack.putWord(0x100, 0x4adf); // TAS (A7)+.
+        stack.bytes[0x1800] = 1;
+        Moto68000 stackCpu(stack);
+        boot(stackCpu);
+        check(execute(stackCpu) == 14 && stack.byte(0x1800) == 0x81 &&
+                  stackCpu.state().address[7] == 0x1802 && (stackCpu.state().sr & 0x0f) == 0,
+              "TAS byte em A7 avança dois bytes");
+
+        Bus invalid;
+        invalid.setup();
+        invalid.putWord(0x100, 0x4ac8); // TAS A0 não possui esse modo de endereço.
+        Moto68000 invalidCpu(invalid);
+        boot(invalidCpu);
+        for (unsigned i = 0; i < 80 && invalidCpu.state().pc != 0x200; ++i)
+            invalidCpu.clock();
+        check(invalidCpu.state().pc == 0x200 && invalidCpu.state().instructions == 0,
+              "TAS com An usa vetor de instrução ilegal");
+    }
+
     void boundariesAndFaults()
     {
         for (bool predecrement : {false, true})
@@ -365,6 +421,7 @@ int main()
     {
         registerCases();
         memoryModes();
+        testSetCases();
         boundariesAndFaults();
     }
     catch (const std::exception &error)

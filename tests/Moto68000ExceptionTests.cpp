@@ -27,7 +27,11 @@ namespace
         }
         bool tryReadWord(std::uint32_t address, std::uint16_t &value) override
         {
-            if (address == failingAddress && waits) { --waits; return false; }
+            if (address == failingAddress && waits)
+            {
+                --waits;
+                return false;
+            }
             value = readWord(address);
             return true;
         }
@@ -44,22 +48,30 @@ namespace
 
     void check(bool condition, const char *message)
     {
-        if (!condition) throw std::runtime_error(message);
+        if (!condition)
+            throw std::runtime_error(message);
     }
 
     void run(Moto68000 &cpu, unsigned cycles)
     {
-        while (cycles--) cpu.clock();
+        while (cycles--)
+            cpu.clock();
     }
 
     void setup(Bus &bus, std::uint16_t operandAddress, std::uint16_t opcode)
     {
-        bus.words[0] = 0; bus.words[2] = 0x1000; // SSP
-        bus.words[4] = 0; bus.words[6] = 0x0100; // PC
-        bus.words[8] = 0; bus.words[10] = 0x0300; // Erro de barramento
-        bus.words[12] = 0; bus.words[14] = 0x0200; // Erro de endereço
-        bus.words[0x100] = 0x41f8; bus.words[0x102] = operandAddress;
-        bus.words[0x104] = opcode; bus.words[0x106] = 0x4e71;
+        bus.words[0] = 0;
+        bus.words[2] = 0x1000; // SSP
+        bus.words[4] = 0;
+        bus.words[6] = 0x0100; // PC
+        bus.words[8] = 0;
+        bus.words[10] = 0x0300; // Erro de barramento
+        bus.words[12] = 0;
+        bus.words[14] = 0x0200; // Erro de endereço
+        bus.words[0x100] = 0x41f8;
+        bus.words[0x102] = operandAddress;
+        bus.words[0x104] = opcode;
+        bus.words[0x106] = 0x4e71;
         bus.words[0x108] = 0x4e71;
         bus.words[0x200] = bus.words[0x300] = 0x7412; // MOVEQ #$12,D2
         bus.words[0x202] = bus.words[0x302] = 0x4e71;
@@ -90,6 +102,10 @@ int main()
     check(!oddCpu.halted() && oddCpu.state().pc == 0x200, "vetor de erro de endereço");
     check(oddCpu.state().address[7] == 0xff2, "pilha da exceção");
     checkFrame(odd, 0x3010, 0x0101, 0x15);
+    check(oddCpu.lastException().serial == 1 && oddCpu.lastException().vector == 3 &&
+              oddCpu.lastException().pc == 0x104 && oddCpu.lastException().opcode == 0x3010 &&
+              oddCpu.lastException().addressValid && oddCpu.lastException().address == 0x0101,
+          "diagnóstico preserva a origem do erro de endereço");
     for (const auto &pins : odd.trace)
         check(!(pins.active && pins.address == 0x0101), "acesso ímpar não chegou ao barramento");
     run(oddCpu, 4);
@@ -116,8 +132,9 @@ int main()
     check(instructionCpu.state().pc == 0x200 && !instructionCpu.halted(),
           "erro de endereço na busca de instrução");
     check(oddInstruction.words.at(0xff8) == 0x6001 &&
-          oddInstruction.words.at(0xffc) == 0x0103 &&
-          oddInstruction.words.at(0xffe) == 0x16, "quadro da busca de instrução");
+              oddInstruction.words.at(0xffc) == 0x0103 &&
+              oddInstruction.words.at(0xffe) == 0x16,
+          "quadro da busca de instrução");
 
     Bus readFault;
     setup(readFault, 0x0400, 0x3010);
@@ -128,6 +145,23 @@ int main()
     run(readCpu, 48 + 2 + 3 + 49);
     check(!readCpu.halted() && readCpu.state().pc == 0x300, "vetor de erro de leitura");
     checkFrame(readFault, 0x3010, 0x0400, 0x15);
+    check(readCpu.lastException().serial == 1 && readCpu.lastException().vector == 2 &&
+              readCpu.lastException().addressValid && readCpu.lastException().address == 0x0400,
+          "diagnóstico preserva a origem do erro de barramento");
+
+    Bus illegal;
+    setup(illegal, 0x0400, 0x3010);
+    illegal.words[0x100] = 0x4afc; // ILLEGAL.
+    Moto68000 illegalCpu(illegal);
+    illegalCpu.reset();
+    for (unsigned cycle = 0; cycle < 60 && !illegalCpu.lastException().serial; ++cycle)
+        illegalCpu.clock();
+    check(illegalCpu.lastException().serial == 1 && illegalCpu.lastException().vector == 4 &&
+              illegalCpu.lastException().pc == 0x100 && illegalCpu.lastException().opcode == 0x4afc &&
+              !illegalCpu.lastException().addressValid,
+          "diagnóstico preserva PC e opcode antes do tratador de instrução ilegal");
+    illegalCpu.reset();
+    check(illegalCpu.lastException().serial == 0, "reset limpa o diagnóstico anterior");
 
     Bus writeFault;
     setup(writeFault, 0x0400, 0x3080); // MOVE.W D0,(A0)
@@ -169,19 +203,22 @@ int main()
     Bus userFault;
     setup(userFault, 0x0101, 0x3010);
     userFault.words[0x100] = 0x4e73; // RTE carrega o SR de usuário.
-    userFault.words[0x1000] = 0; userFault.words[0x1002] = 0;
+    userFault.words[0x1000] = 0;
+    userFault.words[0x1002] = 0;
     userFault.words[0x1004] = 0x0120;
-    userFault.words[0x120] = 0x41f8; userFault.words[0x122] = 0x0101;
-    userFault.words[0x124] = 0x3010; userFault.words[0x126] = 0x4e71;
+    userFault.words[0x120] = 0x41f8;
+    userFault.words[0x122] = 0x0101;
+    userFault.words[0x124] = 0x3010;
+    userFault.words[0x126] = 0x4e71;
     userFault.words[0x128] = 0x4e71;
     Moto68000 userFaultCpu(userFault);
     userFaultCpu.reset();
     run(userFaultCpu, 40 + 20 + 8 + 50);
     check(userFaultCpu.state().pc == 0x200 && userFaultCpu.state().sr == 0x2000 &&
-          userFaultCpu.state().address[7] == 0xff8,
+              userFaultCpu.state().address[7] == 0xff8,
           "erro de usuário troca para o SSP");
     check(userFault.words.at(0xff8) == 0 && userFault.words.at(0xffc) == 0x124 &&
-          userFault.words.at(0xffe) == 0x3010 && userFault.words.at(0x1004) == 0x11,
+              userFault.words.at(0xffe) == 0x3010 && userFault.words.at(0x1004) == 0x11,
           "quadro de erro conserva modo usuário e código de função 1");
 
     Bus exceptionFault;
@@ -192,10 +229,10 @@ int main()
     exceptionFaultCpu.reset();
     run(exceptionFaultCpu, 40 + 21 + 49);
     check(!exceptionFaultCpu.halted() && exceptionFaultCpu.state().pc == 0x300 &&
-          exceptionFaultCpu.state().address[7] == 0xfec,
+              exceptionFaultCpu.state().address[7] == 0xfec,
           "erro de barramento durante exceção comum usa o vetor 2");
     check(exceptionFault.words.at(0xff0) == 0x0010 &&
-          exceptionFault.words.at(0xff6) == 0x0010 &&
-          exceptionFault.words.at(0xff8) == 0x1d,
+              exceptionFault.words.at(0xff6) == 0x0010 &&
+              exceptionFault.words.at(0xff8) == 0x1d,
           "quadro registra vetor e contexto de exceção");
 }

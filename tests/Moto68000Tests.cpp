@@ -75,7 +75,6 @@ int main()
     require(cpu.state().prefetch == std::array<std::uint16_t, 2>{0x4e71, 0x4e71});
     require(bus.reads == std::vector<std::uint32_t>({0, 0, 0, 2, 4, 6, 8, 10}));
     require(bus.readCycles == std::vector<std::uint64_t>({19, 20, 21, 25, 29, 33, 37, 41}));
-    bus.words[6] = 0x4e77; // RTR ainda não implementado.
     bus.stalls = 2;
     tick(cpu, bus, 4);
     require(cpu.state().pc == 8 && cpu.state().instructions == 0);
@@ -85,10 +84,6 @@ int main()
     require(bus.reads.back() == 12 && bus.readCycles.back() == 47);
     tick(cpu, bus, 4);
     require(cpu.state().pc == 12 && cpu.state().instructions == 2);
-    bool rejected = false;
-    try { tick(cpu, bus, 1); }
-    catch (const std::logic_error &) { rejected = true; }
-    require(rejected && bus.reads.back() == 14);
     cpu.reset();
     require(!cpu.resetComplete() && cpu.state().pc == 0 && cpu.state().instructions == 0);
 }

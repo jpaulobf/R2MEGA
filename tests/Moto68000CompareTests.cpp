@@ -471,15 +471,6 @@ namespace
                   oddImmediate.word(0x17f8) == 0x0ca0 &&
                   oddImmediate.word(0x17f6) == 0x1101,
               "CMPI.L desalinhado salvou PC ou endereço incorreto");
-
-        Bus illegal;
-        illegal.setup();
-        illegal.putWord(0x100, 0xb1c8); // Campo de tamanho reservado para CMPM.
-        Moto68000 illegalCpu(illegal);
-        boot(illegalCpu);
-        runUntilPc(illegalCpu, 0x400);
-        check(illegalCpu.state().instructions == 0,
-              "CMPM com tamanho reservado gera instrução ilegal");
     }
 }
 
@@ -619,6 +610,7 @@ int main()
         addressModes.putWord(0x10a, 0xb3fc); // CMPA.L #$80000000,A1
         addressModes.putWord(0x10c, 0x8000);
         addressModes.putWord(0x10e, 0);
+        addressModes.putWord(0x110, 0xb3c8); // CMPA.L A0,A1.
         Moto68000 addressModesCpu(addressModes);
         boot(addressModesCpu);
         execute(addressModesCpu);
@@ -629,6 +621,17 @@ int main()
         check(execute(addressModesCpu) == 14 && addressModesCpu.state().address[1] == 0 &&
                   (addressModesCpu.state().sr & 0x0f) == 0x0b,
               "CMPA.L imediato sinaliza overflow e empréstimo");
+        const auto addressLongCycles = execute(addressModesCpu);
+        if (addressLongCycles != 6)
+            throw std::runtime_error("CMPA.L com origem An: ciclos=" +
+                                     std::to_string(addressLongCycles) +
+                                     " PC=" + std::to_string(addressModesCpu.state().pc));
+        check(addressModesCpu.state().pc == 0x112,
+              "CMPA.L com origem An avança o PC");
+        check(addressModesCpu.state().address[1] == 0,
+              "CMPA.L com origem An preserva o registrador");
+        check((addressModesCpu.state().sr & 0x0f) == 0x01,
+              "CMPA.L com origem An calcula os indicadores");
 
         Bus indexed;
         indexed.setup();

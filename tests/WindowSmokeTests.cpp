@@ -221,6 +221,61 @@ namespace
         require(SDL_PushEvent(&close), "Could not queue close event");
         require(!window.processEvents(), "Window close must stop the application");
     }
+
+    void testPauseShortcut()
+    {
+        bool running = false;
+        bool paused = false;
+        R2MEGA::Window::Window::EmulationCallbacks emulation;
+        emulation.togglePause = [&]()
+        { if (running) paused = !paused; };
+        emulation.isPaused = [&]()
+        { return paused; };
+        R2MEGA::Window::Window window({}, {}, [&]()
+                                      { return running; }, {}, {}, std::move(emulation));
+        window.open();
+        window.render();
+        int count = 0;
+        SDL_Window **windows = SDL_GetWindows(&count);
+        require(windows && count == 1, "Expected one SDL window for pause");
+        const auto id = SDL_GetWindowID(windows[0]);
+        SDL_free(windows);
+
+        SDL_Event focus{};
+        focus.type = SDL_EVENT_WINDOW_FOCUS_GAINED;
+        focus.window.windowID = id;
+        require(SDL_PushEvent(&focus), "Could not queue focus event");
+        SDL_Event key{};
+        key.type = SDL_EVENT_KEY_DOWN;
+        key.key.windowID = id;
+        key.key.key = SDLK_PAUSE;
+        require(SDL_PushEvent(&key), "Could not queue pause key");
+        window.processEvents();
+        require(!paused, "Pause must be ignored before a ROM starts");
+
+        running = true;
+        require(SDL_PushEvent(&key), "Could not queue pause key");
+        window.processEvents();
+        require(paused, "Pause/Break must pause emulation");
+        require(!window.acceptsInput(), "Pause must block game input");
+
+        key.key.repeat = true;
+        require(SDL_PushEvent(&key), "Could not queue repeated pause key");
+        window.processEvents();
+        require(paused, "Key repeat must not resume emulation");
+
+        key.key.repeat = false;
+        key.key.windowID = id + 1000;
+        require(SDL_PushEvent(&key), "Could not queue foreign pause key");
+        window.processEvents();
+        require(paused, "Pause from another window must be ignored");
+
+        key.key.windowID = id;
+        require(SDL_PushEvent(&key), "Could not queue resume key");
+        window.processEvents();
+        require(!paused, "Pause/Break must resume emulation");
+        require(window.acceptsInput(), "Resuming must allow game input");
+    }
 }
 
 int main()
@@ -229,6 +284,7 @@ int main()
     {
         testOpenAndExit();
         testShortcutAndClose();
+        testPauseShortcut();
         testAbout();
         testRomSelection();
         testVideoOutput();

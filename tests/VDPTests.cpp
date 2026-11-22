@@ -1,5 +1,6 @@
 #include "Core/VDP/VDP.h"
 #include <cstdio>
+#include <memory>
 #include <stdexcept>
 
 using namespace R2MEGA::Core;
@@ -56,6 +57,183 @@ int main()
     require(vertical.interruptLevel() == 0);
     vertical.reset();
     require(vertical.interruptLevel() == 0 && vertical.readStatus() == 0x0200);
+
+    VDP horizontal;
+    horizontal.writeControl(0x8010); // IE1 habilita o pedido horizontal de nível 4.
+    horizontal.writeControl(0x8a01); // Um pedido a cada duas linhas.
+    for (unsigned i = 0; i <= VDP::horizontalInterruptCycle; ++i)
+        horizontal.clock();
+    require(horizontal.interruptLevel() == 4);
+    horizontal.readStatus();
+    require(horizontal.interruptLevel() == 4); // A leitura de estado não reconhece H-INT.
+    horizontal.acknowledgeInterrupt(4);
+    require(horizontal.interruptLevel() == 0);
+    while (horizontal.line() != 1)
+        horizontal.clock();
+    for (unsigned i = 0; i <= VDP::horizontalInterruptCycle; ++i)
+        horizontal.clock();
+    require(horizontal.interruptLevel() == 0);
+    while (horizontal.line() != 2)
+        horizontal.clock();
+    for (unsigned i = 0; i <= VDP::horizontalInterruptCycle; ++i)
+        horizontal.clock();
+    require(horizontal.interruptLevel() == 4);
+    horizontal.writeControl(0x8000); // Desabilitar IE1 mascara o pedido pendente.
+    require(horizontal.interruptLevel() == 0);
+    horizontal.writeControl(0x8010);
+    require(horizontal.interruptLevel() == 4);
+    horizontal.acknowledgeInterrupt(4);
+    horizontal.reset();
+    require(horizontal.interruptLevel() == 0);
+
+    auto counter = std::make_unique<VDP>();
+    counter->reset();
+    require(counter->readHvCounter() == 0x0000);
+    for (unsigned i = 0; i < 20; ++i)
+        counter->clock();
+    require(counter->readHvCounter() == 0x0001);
+    while (counter->cycleInLine() != 2959)
+        counter->clock();
+    require(counter->readHvCounter() == 0x0093);
+    counter->clock();
+    require(counter->readHvCounter() == 0x00e9); // H32 salta a faixa de sincronismo.
+    while (counter->cycleInLine() != 3419)
+        counter->clock();
+    require(counter->readHvCounter() == 0x00ff);
+    counter->clock();
+    require(counter->readHvCounter() == 0x0100);
+    while (counter->line() != 234)
+        counter->clock();
+    require(counter->readHvCounter() == 0xea00);
+    while (counter->line() != 235)
+        counter->clock();
+    require(counter->readHvCounter() == 0xe500); // V recua durante o VBlank NTSC.
+    while (counter->line() != 261)
+        counter->clock();
+    require(counter->readHvCounter() == 0xff00);
+    while (counter->frame() == 0)
+        counter->clock();
+    require(counter->readHvCounter() == 0x0000);
+
+    auto wideCounter = std::make_unique<VDP>();
+    wideCounter->reset();
+    wideCounter->writeControl(0x8c01); // H40.
+    while (wideCounter->readHvCounter() != 0x00b6)
+        wideCounter->clock();
+    while ((wideCounter->readHvCounter() & 0xff) == 0xb6)
+        wideCounter->clock();
+    require(wideCounter->readHvCounter() == 0x00e4);
+    while (wideCounter->cycleInLine() != 3419)
+        wideCounter->clock();
+    require(wideCounter->readHvCounter() == 0x00ff);
+
+    auto fifo = std::make_unique<VDP>();
+    fifo->reset();
+    fifo->writeControl(0x8140); // Exibição ativa reduz os slots disponíveis.
+    fifo->writeControl(0x8f02);
+    fifo->writeControl(0x4000); // VRAM $0000.
+    fifo->writeControl(0);
+    for (unsigned i = 0; i < 4; ++i)
+        require(fifo->tryWriteData(std::uint16_t(0x1100 + i)));
+    require(fifo->readStatus() == 0x0100 && fifo->dataAddress() == 8);
+    require(!fifo->tryWriteData(0x9999) && fifo->dataAddress() == 8);
+    require(fifo->vramByte(0) == 0); // A escrita aguarda o slot da VDP.
+    fifo->writeControl(0xc000);      // Alterar o comando não muda entradas já aceitas.
+    fifo->writeControl(0);
+    for (unsigned i = 0; i < 511; ++i)
+        fifo->clock();
+    require(fifo->vramByte(0) == 0x11 && fifo->vramByte(1) == 0x00);
+    require((fifo->readStatus() & 0x0300) == 0);
+    require(fifo->tryWriteData(0x00e0)); // A vaga livre aceita escrita na CRAM.
+    for (unsigned i = 0; i < 3000 && !(fifo->readStatus() & 0x0200); ++i)
+        fifo->clock();
+    require((fifo->readStatus() & 0x0300) == 0x0200);
+    require(fifo->vramByte(6) == 0x11 && fifo->vramByte(7) == 0x03);
+    require(fifo->cramWord(0) == 0x00e0);
+
+    auto blankFifo = std::make_unique<VDP>();
+    blankFifo->reset();
+    blankFifo->writeControl(0xc000);
+    blankFifo->writeControl(0);
+    require(blankFifo->tryWriteData(0x000e));
+    for (unsigned i = 0; i < 22; ++i)
+        blankFifo->clock();
+    require(blankFifo->readStatus() == 0x0200 && blankFifo->cramWord(0) == 0x000e);
+
+    auto h32Slots = std::make_unique<VDP>();
+    h32Slots->writeControl(0x8140);
+    h32Slots->writeControl(0xc000);
+    h32Slots->writeControl(0);
+    require(h32Slots->tryWriteData(0x000e));
+    for (unsigned i = 0; i < 230; ++i)
+        h32Slots->clock();
+    require(h32Slots->cramWord(0) == 0);
+    h32Slots->clock(); // Primeiro slot externo H32: ciclo mestre 230.
+    require(h32Slots->cramWord(0) == 0x000e);
+
+    auto h40Slots = std::make_unique<VDP>();
+    h40Slots->writeControl(0x8140);
+    h40Slots->writeControl(0x8c01);
+    h40Slots->writeControl(0xc000);
+    h40Slots->writeControl(0);
+    require(h40Slots->tryWriteData(0x000e));
+    for (unsigned i = 0; i < 352; ++i)
+        h40Slots->clock();
+    require(h40Slots->cramWord(0) == 0);
+    h40Slots->clock(); // Primeiro slot externo H40: ciclo mestre 352.
+    require(h40Slots->cramWord(0) == 0x000e);
+
+    auto contested = std::make_unique<VDP>();
+    contested->setDmaReader([](std::uint32_t)
+                            { return std::uint16_t(0x00e0); });
+    contested->writeControl(0x8150); // Exibição e DMA habilitadas.
+    contested->writeControl(0x8f02);
+    contested->writeControl(0x9301);
+    contested->writeControl(0x9400);
+    contested->writeControl(0x9500);
+    contested->writeControl(0x9600);
+    contested->writeControl(0x9700);
+    contested->writeControl(0xc000);
+    contested->writeControl(0);
+    require(contested->tryWriteData(0x000e)); // Escrita da CPU já na FIFO.
+    contested->writeControl(0xc002);
+    contested->writeControl(0x0080); // DMA de uma palavra para a CRAM seguinte.
+    for (unsigned i = 0; i < 231; ++i)
+        contested->clock();
+    require(contested->cramWord(0) == 0x000e);
+    require(contested->cramWord(1) == 0 && contested->dmaActive());
+    for (unsigned i = 231; i < 511; ++i)
+        contested->clock();
+    require(contested->cramWord(1) == 0x00e0 && !contested->dmaActive());
+
+    for (unsigned h40 = 0; h40 < 2; ++h40)
+    {
+        auto timedFill = std::make_unique<VDP>();
+        timedFill->writeControl(0x8110);
+        timedFill->writeControl(std::uint16_t(0x8c00 | h40));
+        timedFill->writeControl(0x8f01);
+        timedFill->writeControl(0x932c); // 300 bytes de preenchimento.
+        timedFill->writeControl(0x9401);
+        timedFill->writeControl(0x9780);
+        timedFill->writeControl(0x4000);
+        timedFill->writeControl(0x0080);
+        timedFill->writeData(0x1200);
+        for (unsigned cycle = 0; cycle < VDP::masterCyclesPerLine; ++cycle)
+            timedFill->clock();
+        // Dois slots de partida, depois 165 acessos H32 ou 203 H40.
+        require(timedFill->dmaRemaining() == (h40 ? 97u : 135u));
+    }
+
+    VDP priority;
+    priority.writeControl(0x8010);
+    priority.writeControl(0x8120);
+    for (std::uint32_t i = 0; i <= VDP::visibleLines * VDP::masterCyclesPerLine + VDP::verticalInterruptCycle; ++i)
+        priority.clock();
+    require(priority.interruptLevel() == 6); // V-INT prevalece sobre H-INT pendente.
+    priority.acknowledgeInterrupt(6);
+    require(priority.interruptLevel() == 4);
+    priority.acknowledgeInterrupt(4);
+    require(priority.interruptLevel() == 0);
 
     vdp.writeControl(0x8f02); // Incremento automático de dois bytes.
     vdp.writeControl(0x5234); // Escrita na VRAM em $1234.

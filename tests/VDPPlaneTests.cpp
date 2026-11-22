@@ -169,4 +169,65 @@ int main(int argc, char **argv)
     writeVram(scroll, 0xe080, 2);
     clockFrame(scroll);
     require(scroll.pixels()[8 * VDP::width] == 0xff00fc00);
+
+    VDP window;
+    window.reset();
+    setRegister(window, 1, 0x40);
+    setRegister(window, 2, 0x30); // Plano A em $C000.
+    setRegister(window, 3, 0x2c); // Janela em $B000.
+    setRegister(window, 4, 7);    // Plano B em $E000.
+    setRegister(window, 13, 0x3c);
+    setRegister(window, 15, 2);
+    writeCram(window, 1, 0x000e);
+    writeCram(window, 2, 0x00e0);
+    writeCram(window, 3, 0x0e00);
+    writeCram(window, 4, 0x00ee);
+    for (unsigned row = 0; row < 8; ++row)
+        for (unsigned word = 0; word < 2; ++word)
+        {
+            writeVram(window, 32 + row * 4 + word * 2, 0x1111);
+            writeVram(window, 64 + row * 4 + word * 2, 0x2222);
+            writeVram(window, 96 + row * 4 + word * 2, 0x3333);
+            writeVram(window, 128 + row * 4 + word * 2, 0x4444);
+        }
+    writeVram(window, 0xc000, 1);
+    writeVram(window, 0xc004, 1);
+    writeVram(window, 0xc040, 1);
+    writeVram(window, 0xc044, 1);
+    writeVram(window, 0xe000, 2);
+    writeVram(window, 0xe004, 2);
+    writeVram(window, 0xe006, 2);
+    writeVram(window, 0xe040, 2);
+    writeVram(window, 0xe044, 2);
+    writeVram(window, 0xb004, 3);
+    writeVram(window, 0xb044, 4);  // Linha 1 da tabela H32.
+    writeVram(window, 0xb084, 3);  // Linha 1 da tabela H40.
+    setRegister(window, 17, 0x81); // Janela à direita de x=16.
+    clockFrame(window);
+    require(window.pixels()[0] == 0xfffc0000);
+    require(window.pixels()[16] == 0xff0000fc);
+    require(window.pixels()[24] == 0xff00fc00); // Janela transparente revela B, não A.
+
+    writeVram(window, 0xe004, 0x8002); // B alto cobre janela baixa.
+    clockFrame(window);
+    require(window.pixels()[16] == 0xff00fc00);
+    writeVram(window, 0xb004, 0x8003); // Janela alta cobre B alto.
+    clockFrame(window);
+    require(window.pixels()[16] == 0xff0000fc);
+    writeVram(window, 0xe004, 2);
+    writeVram(window, 0xb004, 3);
+
+    setRegister(window, 17, 0);    // Nenhuma coluna da janela à esquerda.
+    setRegister(window, 18, 0x81); // Janela abaixo da primeira linha de células.
+    clockFrame(window);
+    require(window.pixels()[16] == 0xfffc0000);
+    require(window.pixels()[8 * VDP::width + 16] == 0xfffcfc00);
+    setRegister(window, 12, 1); // H40 usa 64 entradas por linha na janela.
+    clockFrame(window);
+    require(window.pixels()[8 * VDP::width + 16] == 0xff0000fc);
+    setRegister(window, 18, 0);
+    setRegister(window, 17, 0x80); // Janela cobre a largura inteira em H40.
+    writeVram(window, 0xb000 + 39 * 2, 3);
+    clockFrame(window);
+    require(window.pixels()[319] == 0xff0000fc);
 }

@@ -253,4 +253,85 @@ int main()
     check(oddCpu.state().pc == 0x300 && !oddCpu.halted() &&
               oddTarget.words.at(0xff4) == 0x6101 && oddTarget.words.at(0xff8) == 0x0103,
           "erro de endereço na busca da subrotina");
+
+    Bus frame;
+    setup(frame);
+    frame.words[0x100] = 0x4df8; // LEA $0F00,A6.
+    frame.words[0x102] = 0x0f00;
+    frame.words[0x104] = 0x4e56; // LINK A6,#-8.
+    frame.words[0x106] = 0xfff8;
+    frame.words[0x108] = 0x4e5e; // UNLK A6.
+    Moto68000 frameCpu(frame);
+    frameCpu.reset();
+    run(frameCpu, 40 + 8);
+    check(frameCpu.state().address[6] == 0x0f00 && frameCpu.state().address[7] == 0x1000,
+          "LEA prepara a moldura da pilha");
+    frame.reads.clear();
+    frame.writes.clear();
+    run(frameCpu, 16);
+    check(frameCpu.state().pc == 0x108 && frameCpu.state().address[6] == 0xffc &&
+              frameCpu.state().address[7] == 0xff4 && frame.words.at(0xffc) == 0 &&
+              frame.words.at(0xffe) == 0x0f00,
+          "LINK salva An e reserva espaço na pilha em 16 ciclos");
+    check(frame.writes == std::vector<std::uint32_t>({0xffe, 0xffc}) &&
+              frame.reads == std::vector<std::uint32_t>({0x108, 0x10a}),
+          "LINK escreve duas palavras e lê duas palavras de programa");
+    frame.reads.clear();
+    run(frameCpu, 12);
+    check(frameCpu.state().pc == 0x10a && frameCpu.state().address[6] == 0x0f00 &&
+              frameCpu.state().address[7] == 0x1000 &&
+              frame.reads == std::vector<std::uint32_t>({0xffc, 0xffe, 0x10c}),
+          "UNLK restaura An e A7 em 12 ciclos");
+
+    Bus stackFrame;
+    setup(stackFrame);
+    stackFrame.words[0x100] = 0x4e57; // LINK A7,#-4.
+    stackFrame.words[0x102] = 0xfffc;
+    Moto68000 stackFrameCpu(stackFrame);
+    stackFrameCpu.reset();
+    run(stackFrameCpu, 40 + 16);
+    check(stackFrameCpu.state().address[7] == 0xff8 &&
+              stackFrame.words.at(0xffc) == 0 && stackFrame.words.at(0xffe) == 0x1000,
+          "LINK A7 usa o valor antigo da pilha antes de aplicar o deslocamento");
+
+    struct PeaCase
+    {
+        std::uint16_t opcode, first, second;
+        std::uint32_t address, nextPc;
+        unsigned cycles;
+    };
+    for (const auto &test : {
+             PeaCase{0x4857, 0, 0, 0x1000, 0x102, 12},               // PEA (A7).
+             PeaCase{0x486f, 4, 0, 0x1004, 0x104, 16},               // PEA (4,A7).
+             PeaCase{0x4877, 4, 0, 0x1004, 0x104, 20},               // PEA (4,A7,D0.W).
+             PeaCase{0x4878, 0xff00, 0, 0xffffff00, 0x104, 16},      // PEA $FF00.W.
+             PeaCase{0x4879, 0x00ff, 0xf3f8, 0x00fff3f8, 0x106, 20}, // PEA $00FFF3F8.L.
+             PeaCase{0x487a, 0x0010, 0, 0x0112, 0x104, 16},          // PEA (16,PC).
+             PeaCase{0x487b, 4, 0, 0x0106, 0x104, 20}                // PEA (4,PC,D0.W).
+         })
+    {
+        Bus bus;
+        setup(bus);
+        bus.words[0x100] = test.opcode;
+        bus.words[0x102] = test.first;
+        bus.words[0x104] = test.second;
+        Moto68000 cpu(bus);
+        cpu.reset();
+        run(cpu, 40);
+        bus.reads.clear();
+        bus.writes.clear();
+        run(cpu, test.cycles);
+        check(cpu.state().instructions == 1 && cpu.state().pc == test.nextPc &&
+                  cpu.state().address[7] == 0xffc && cpu.state().sr == 0x2700,
+              "PEA conclui sem alterar CCR ou desviar o PC");
+        check(bus.words.count(0xffc) && bus.words.count(0xffe),
+              "PEA deve escrever as duas palavras da pilha");
+        check(bus.words.at(0xffc) == std::uint16_t(test.address >> 16) &&
+                  bus.words.at(0xffe) == std::uint16_t(test.address) &&
+                  bus.writes == std::vector<std::uint32_t>({0xffe, 0xffc}),
+              "PEA empilha o endereço efetivo em ordem correta");
+        check(cpu.state().prefetch[0] ==
+                  (bus.words.count(test.nextPc) ? bus.words.at(test.nextPc) : 0x4e71),
+              "PEA preserva a próxima instrução na pré-busca");
+    }
 }

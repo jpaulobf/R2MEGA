@@ -325,6 +325,30 @@ namespace
         execute(equalCpu);
         check(equal.byte(0x300) == 0 && equalCpu.state().sr == equalFlags,
               "SNE deve escrever zero quando Z está ativo");
+
+        for (bool condition : {false, true})
+        {
+            Bus absoluteLong;
+            absoluteLong.setup();
+            const auto destination = std::uint32_t(condition ? 0x00fff3f9 : 0x00fff3f8);
+            absoluteLong.putWord(0x100, condition ? 0x50f9 : 0x51f9); // ST/SF $00FFF3F8/9.L.
+            absoluteLong.putWord(0x102, 0x00ff);
+            absoluteLong.putWord(0x104, std::uint16_t(destination));
+            absoluteLong.bytes[destination] = 0x5a;
+            Moto68000 longCpu(absoluteLong);
+            boot(longCpu);
+            const auto longFlags = longCpu.state().sr;
+            const auto before = absoluteLong.transfers.size();
+            check(execute(longCpu) == 20, "Scc absoluto longo deve usar cinco acessos de barramento");
+            check(absoluteLong.byte(destination) == (condition ? 0xff : 0) &&
+                      longCpu.state().pc == 0x106 && longCpu.state().sr == longFlags &&
+                      longCpu.state().prefetch[0] == 0x4e71,
+                  "Scc absoluto longo deve escrever o byte e manter flags e pré-busca");
+            check(std::vector<std::pair<char, std::uint32_t>>(
+                      absoluteLong.transfers.begin() + before, absoluteLong.transfers.end()) ==
+                      std::vector<std::pair<char, std::uint32_t>>({{'R', 0x104}, {'r', destination}, {'R', 0x106}, {'w', destination}, {'R', 0x108}}),
+                  "Scc absoluto longo deve buscar as extensões e escrever na ordem correta");
+        }
     }
 }
 
