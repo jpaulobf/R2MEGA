@@ -31,11 +31,11 @@ namespace R2MEGA::Core
         const Z80 &z80() const { return z80_; }
         const SN76489 &psg() const { return sn76489_; }
         const YM2612 &ym2612() const { return ym2612_; }
-        
+
         // Atualiza os botões lógicos das duas portas antes da leitura pela ROM.
         void setControllerButtons(unsigned player, std::uint16_t buttons) { controllers_.setButtons(player, buttons); }
         std::uint16_t controllerButtons(unsigned player) const { return controllers_.buttons(player); }
-        
+
         // Permite que os componentes da placa apresentem um nível IPL ao 68000.
         void setM68KInterruptLevel(unsigned level);
 
@@ -47,6 +47,7 @@ namespace R2MEGA::Core
         // Acessos do 68000 aos dispositivos atualmente ligados ao barramento.
         std::uint8_t readByte(std::uint32_t address) override;
         std::uint16_t readWord(std::uint32_t address) override;
+        bool tryWriteWord(std::uint32_t address, std::uint16_t value) override;
         bool tryAcknowledgeInterrupt(unsigned level, M68KInterruptResponse &response) override;
         void writeByte(std::uint32_t address, std::uint8_t value) override;
         void writeWord(std::uint32_t address, std::uint16_t value) override;

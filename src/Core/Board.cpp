@@ -57,7 +57,7 @@ namespace R2MEGA::Core
 
     bool Board::tryAcknowledgeInterrupt(unsigned level, M68KInterruptResponse &response)
     {
-        if (level == 6 && vdp_.interruptLevel() == 6)
+        if ((level == 6 || level == 4) && vdp_.interruptLevel() == level)
             vdp_.acknowledgeInterrupt(level);
         cpu_.setInterruptLevel(std::max(externalInterruptLevel_, vdp_.interruptLevel()));
         return M68KBus::tryAcknowledgeInterrupt(level, response);
@@ -124,6 +124,11 @@ namespace R2MEGA::Core
             const auto status = vdp_.readStatus();
             return (address & 1) ? std::uint8_t(status) : std::uint8_t(status >> 8);
         }
+        if (address == 0xc00008 || address == 0xc00009)
+        {
+            const auto counter = vdp_.readHvCounter();
+            return (address & 1) ? std::uint8_t(counter) : std::uint8_t(counter >> 8);
+        }
         // Os 64 KiB físicos aparecem repetidos na faixa E00000-FFFFFF.
         if (address >= 0xe00000 && address <= 0xffffff)
             return workRam_.read(address & 0xffff);
@@ -143,6 +148,8 @@ namespace R2MEGA::Core
             return z80BusGranted() ? 0 : 0x0100;
         if (address == 0xc00004 || address == 0xc00006)
             return vdp_.readStatus();
+        if (address == 0xc00008)
+            return vdp_.readHvCounter();
         if (address == 0xc00000 || address == 0xc00002)
             return vdp_.readData();
         return (std::uint16_t(readByte(address)) << 8) | readByte(address + 1);
@@ -253,6 +260,14 @@ namespace R2MEGA::Core
             return;
         }
         notImplemented();
+    }
+
+    bool Board::tryWriteWord(std::uint32_t address, std::uint16_t value)
+    {
+        if (address == 0xc00000 || address == 0xc00002)
+            return vdp_.tryWriteData(value);
+        writeWord(address, value);
+        return true;
     }
     std::uint8_t Board::readMemory(std::uint16_t address) const
     {
