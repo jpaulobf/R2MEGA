@@ -1,4 +1,5 @@
 #include "Core/IO/ControllerPorts.h"
+#include "Core/IO/Joypad.h"
 #include <stdexcept>
 
 namespace R2MEGA::Core
@@ -6,6 +7,7 @@ namespace R2MEGA::Core
     void ControllerPorts::reset()
     {
         registers_.fill(0);
+        input_.reset();
     }
 
     std::uint8_t ControllerPorts::readByte(unsigned offset) const
@@ -21,8 +23,12 @@ namespace R2MEGA::Core
         if (index >= 1 && index <= 3)
         {
             const std::uint8_t direction = registers_[index + 3];
-            // Entradas sem botões pressionados ficam em nível alto.
-            return (registers_[index] & direction) | (0x7f & ~direction);
+            // TH em entrada permanece alto; em saída, usa o valor escrito pela ROM.
+            const bool thHigh = !(direction & 0x40) || (registers_[index] & 0x40);
+            const std::uint8_t lines = index <= 2
+                                           ? Joypad::read(input_.buttons(index - 1), thHigh)
+                                           : std::uint8_t(0x7f);
+            return (registers_[index] & direction) | (lines & ~direction & 0x7f);
         }
         return registers_[index];
     }
