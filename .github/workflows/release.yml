@@ -1,0 +1,147 @@
+name: Compilação e publicação do R2MEGA
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: # Permite validar e baixar os pacotes pela aba Actions.
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Obter os fontes
+        uses: actions/checkout@v4
+
+      - name: Conferir a versão da tag
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        run: |
+          $cmake = Get-Content -LiteralPath CMakeLists.txt -Raw
+          if ($cmake -notmatch 'project\(R2MEGA\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)') {
+            throw 'Versão do projeto não encontrada em CMakeLists.txt.'
+          }
+          if ($env:GITHUB_REF_NAME -ne "v$($Matches[1])") {
+            throw "A tag $env:GITHUB_REF_NAME não corresponde à versão $($Matches[1]) do CMake."
+          }
+
+      - name: Instalar MinGW
+        run: |
+          choco install mingw --version 15.2.0 -y
+          if ($LASTEXITCODE -ne 0) { throw 'Falha ao instalar MinGW.' }
+          "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Configurar CMake
+        run: |
+          cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DR2MEGA_BUILD_GUI=ON -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+
+      - name: Compilar aplicativo e testes
+        run: |
+          cmake --build build --config Release --parallel 2
+
+      - name: Executar testes
+        run: |
+          ctest --test-dir build --output-on-failure
+
+      - name: Preparar pacote Windows
+        run: |
+          New-Item -ItemType Directory -Path release_pkg | Out-Null
+          Copy-Item -LiteralPath build/R2MEGA.exe, LICENSE, README.md -Destination release_pkg/
+          # Inclui apenas os DLLs do MinGW usados pelo executável.
+          $imports = & objdump -p build/R2MEGA.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Falha ao inspecionar dependências do executável.' }
+          $compilerDir = Split-Path -Parent (Get-Command g++).Source
+          foreach ($runtime in @('libstdc++-6.dll', 'libgcc_s_seh-1.dll', 'libwinpthread-1.dll')) {
+            if (-not ($imports -match "DLL Name:\s+$([regex]::Escape($runtime))")) { continue }
+            $runtimePath = & g++ "-print-file-name=$runtime"
+            if (-not (Test-Path -LiteralPath $runtimePath -PathType Leaf)) {
+              $runtimePath = Join-Path $compilerDir $runtime
+            }
+            if (-not (Test-Path -LiteralPath $runtimePath -PathType Leaf)) {
+              throw "Runtime do MinGW não encontrado: $runtime"
+            }
+            Copy-Item -LiteralPath $runtimePath -Destination release_pkg/
+          }
+
+      - name: Criar ZIP
+        run: |
+          Compress-Archive -Path release_pkg/* -DestinationPath R2MEGA_Windows_x64.zip
+
+      - name: Enviar pacote Windows
+        uses: actions/upload-artifact@v4
+        with:
+          name: R2MEGA_Windows_x64
+          path: R2MEGA_Windows_x64.zip
+          if-no-files-found: error
+
+  build-linux:
+    # Mantém Ubuntu 22.04 como base de compatibilidade do pacote Linux.
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Obter os fontes
+        uses: actions/checkout@v4
+
+      - name: Instalar dependências de compilação
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake git pkg-config \
+            libpulse-dev libasound2-dev libpipewire-0.3-dev \
+            libx11-dev libxext-dev libxcursor-dev libxi-dev libxrandr-dev libxss-dev libxfixes-dev libxtst-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libgles-dev libdrm-dev libgbm-dev \
+            libdbus-1-dev libudev-dev
+
+      - name: Configurar CMake
+        run: cmake -S . -B build-linux -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DR2MEGA_BUILD_GUI=ON
+
+      - name: Compilar aplicativo e testes
+        run: cmake --build build-linux --config Release --parallel 2
+
+      - name: Executar testes
+        run: |
+          ctest --test-dir build-linux --output-on-failure
+
+      - name: Preparar pacote Linux
+        run: |
+          mkdir release_pkg
+          cp build-linux/R2MEGA LICENSE README.md release_pkg/
+          tar -czf R2MEGA_Linux_x64.tar.gz -C release_pkg R2MEGA LICENSE README.md
+
+      - name: Enviar pacote Linux
+        uses: actions/upload-artifact@v4
+        with:
+          name: R2MEGA_Linux_x64
+          path: R2MEGA_Linux_x64.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publicar release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    needs: [build-windows, build-linux]
+    permissions:
+      contents: write
+    steps:
+      - name: Baixar os pacotes
+        uses: actions/download-artifact@v4
+        with:
+          pattern: R2MEGA_*
+          path: dist
+          merge-multiple: true
+
+      - name: Publicar os pacotes na release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/R2MEGA_Windows_x64.zip
+            dist/R2MEGA_Linux_x64.tar.gz
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+

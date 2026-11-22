@@ -17,6 +17,14 @@ ctest --test-dir build -C Debug --output-on-failure
 
 Para compilar somente o núcleo, use `-DR2MEGA_BUILD_GUI=OFF`.
 
+## Pacotes de release
+
+O workflow em `.github/workflows/release.yml` compila e testa Windows x64 e
+Linux x64. A execução manual pela aba Actions disponibiliza os dois pacotes
+como artefatos. Uma tag `vX.Y.Z` correspondente à versão declarada no
+`CMakeLists.txt` publica os pacotes na página Releases após os testes passarem.
+Por exemplo, para a versão atual, a tag é `v0.0.3`.
+
 ## ROMs e controles
 
 `File > Open...` ou `Ctrl+O` carrega arquivos `.md`, `.gen`, `.bin`, `.smd` e
