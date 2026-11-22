@@ -21,6 +21,17 @@ namespace R2MEGA::Core
             std::uint64_t cycles = 0;
         };
 
+        // Guarda a causa original mesmo depois que o tratador da ROM assume o PC.
+        struct ExceptionEvent
+        {
+            std::uint64_t serial = 0;
+            unsigned vector = 0;
+            std::uint32_t pc = 0;
+            std::uint16_t opcode = 0;
+            std::uint32_t address = 0;
+            bool addressValid = false;
+        };
+
         explicit Moto68000(M68KBus &bus);
         Moto68000(const Moto68000 &) = delete;
         Moto68000 &operator=(const Moto68000 &) = delete;
@@ -33,6 +44,7 @@ namespace R2MEGA::Core
         void setInterruptLevel(unsigned level);
         const State &state() const { return state_; }
         const M68KPins &pins() const { return pins_; }
+        const ExceptionEvent &lastException() const { return lastException_; }
         // Indica apenas que os quatro words dos vetores foram lidos.
         bool resetVectorsLoaded() const { return active_ && resetRead_ >= 4; }
         bool resetComplete() const { return active_ && resetRead_ == 6; }
@@ -69,10 +81,12 @@ namespace R2MEGA::Core
         void clockMovep();
         void clockMovem();
         void clockStatusMove();
+        void clockFrame();
         void clockScc();
         // A referência não é proprietária; o barramento deve sobreviver à CPU.
         M68KBus &bus_;
         State state_;
+        ExceptionEvent lastException_;
         bool active_ = false;
         unsigned resetRead_ = 6;
         unsigned startupCycles_ = 0;
@@ -101,7 +115,8 @@ namespace R2MEGA::Core
             Bsr,
             Jsr,
             Jmp,
-            Rts
+            Rts,
+            Pea
         };
         ControlOp controlOp_ = ControlOp::None;
         unsigned controlStage_ = 0;
@@ -110,6 +125,8 @@ namespace R2MEGA::Core
         std::uint32_t controlTarget_ = 0;
         std::uint32_t controlReturn_ = 0;
         std::uint16_t controlIr_ = 0;
+        std::uint16_t controlNextOpcode_ = 0;
+        unsigned controlExtensions_ = 0;
         enum class MemoryOp
         {
             None,
@@ -128,7 +145,8 @@ namespace R2MEGA::Core
             ShiftRotate,
             Movep,
             Movem,
-            StatusMove
+            StatusMove,
+            Frame
         };
         MemoryOp memoryOp_ = MemoryOp::None;
         unsigned memoryStage_ = 0;
@@ -192,6 +210,7 @@ namespace R2MEGA::Core
             enum class Kind
             {
                 Test,
+                TestSet,
                 Clear,
                 Compare,
                 CompareAddress
@@ -412,6 +431,14 @@ namespace R2MEGA::Core
             std::uint16_t value = 0, nextOpcode = 0, nextFollowing = 0;
             std::uint32_t address = 0;
         } statusMove_;
+        // LINK e UNLK conservam os endereços durante as transferências da pilha.
+        struct Frame
+        {
+            bool unlink = false;
+            unsigned reg = 0, stage = 0;
+            std::uint32_t oldAddress = 0, base = 0, value = 0;
+            std::uint16_t nextOpcode = 0;
+        } frame_;
         std::uint8_t pendingByte_ = 0;
         bool halted_ = false;
         bool exceptionActive_ = false;
@@ -432,6 +459,7 @@ namespace R2MEGA::Core
         std::uint16_t exceptionIr_ = 0;
         std::uint16_t exceptionStatus_ = 0;
         bool returnActive_ = false;
+        bool returnCcrOnly_ = false;
         unsigned returnStage_ = 0;
         std::uint16_t returnSr_ = 0;
         std::uint16_t returnIr_ = 0;
