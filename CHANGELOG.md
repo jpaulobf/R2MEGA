@@ -10,3 +10,5 @@ Primeira versão do R2MEGA, ainda em desenvolvimento.
 
 
 - Carregamento de ROMs em memória, incluindo arquivos ZIP e conversão de SMD.
+
+- Controles de três botões para dois jogadores, com teclado, gamepads SDL e remapeamento persistente.
