@@ -4,6 +4,8 @@
 #include <functional>
 #include <string>
 #include <cstdint>
+#include <SDL3/SDL.h>
+#include "Systems/KeyboardMapping.h"
 
 namespace R2MEGA::Window
 {
@@ -27,9 +29,16 @@ namespace R2MEGA::Window
             std::string error;
         };
         using VideoStatusProvider = std::function<VideoStatus()>;
+        struct InputCallbacks
+        {
+            std::function<void(const SDL_Event &, bool)> event;
+            std::function<void(const Systems::KeyboardMapping &)> setKeyboardMapping;
+            std::function<bool(unsigned)> playerUsesJoystick;
+            std::function<void(unsigned, bool)> setPlayerJoystick;
+        };
 
         explicit Window(OpenHandler openHandler = {}, VideoProvider videoProvider = {}, RunningProvider runningProvider = {},
-                        VideoStatusProvider videoStatusProvider = {});
+                        VideoStatusProvider videoStatusProvider = {}, InputCallbacks inputCallbacks = {});
 
         ~Window();
 
@@ -42,6 +51,8 @@ namespace R2MEGA::Window
 
         // Retorna falso quando a aplicação deve encerrar.
         bool processEvents();
+        // Bloqueia a entrada de jogo enquanto a janela ou um diálogo captura o teclado.
+        bool acceptsInput() const;
         void render();
 
     private:

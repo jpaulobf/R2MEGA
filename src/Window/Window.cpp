@@ -1,5 +1,7 @@
 #include "Window/Window.h"
 #include "Window/FileManager.h"
+#include "Window/KeyboardConfig.h"
+#include "Window/KeyboardDialog.h"
 #include <SDL3/SDL.h>
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
@@ -23,11 +25,16 @@ namespace R2MEGA::Window
         VideoProvider videoProvider;
         RunningProvider runningProvider;
         VideoStatusProvider videoStatusProvider;
+        InputCallbacks inputCallbacks;
         FileManager files;
+        KeyboardConfig keyboardConfig;
+        KeyboardDialog keyboardDialog;
+        bool focused = false, minimized = false;
         explicit Impl(OpenHandler handler, VideoProvider video,
-                      RunningProvider running, VideoStatusProvider status)
+                      RunningProvider running, VideoStatusProvider status, InputCallbacks input)
             : openHandler(std::move(handler)), videoProvider(std::move(video)),
               runningProvider(std::move(running)), videoStatusProvider(std::move(status)),
+              inputCallbacks(std::move(input)),
               files([this](const std::filesystem::path &path)
                     {
                 if (!openHandler) throw std::runtime_error("ROM loading is unavailable.");
@@ -54,9 +61,10 @@ namespace R2MEGA::Window
     };
 
     Window::Window(OpenHandler openHandler, VideoProvider videoProvider,
-                   RunningProvider runningProvider, VideoStatusProvider videoStatusProvider)
+                   RunningProvider runningProvider, VideoStatusProvider videoStatusProvider,
+                   InputCallbacks inputCallbacks)
         : impl_(std::make_unique<Impl>(std::move(openHandler), std::move(videoProvider), std::move(runningProvider),
-                                       std::move(videoStatusProvider))) {}
+                                       std::move(videoStatusProvider), std::move(inputCallbacks))) {}
     Window::~Window() = default;
 
     void Window::open()
@@ -67,10 +75,14 @@ namespace R2MEGA::Window
         if (!SDL_Init(SDL_INIT_VIDEO))
             throw std::runtime_error(SDL_GetError());
         s.sdlReady = true;
+        s.keyboardDialog.setMapping(s.keyboardConfig.load());
+        if (s.inputCallbacks.setKeyboardMapping)
+            s.inputCallbacks.setKeyboardMapping(s.keyboardDialog.mapping());
         s.window = SDL_CreateWindow("R2MEGA v." R2_APP_VERSION, 960, 672,
                                     SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
         if (!s.window)
             throw std::runtime_error(SDL_GetError());
+        s.focused = (SDL_GetWindowFlags(s.window) & SDL_WINDOW_INPUT_FOCUS) != 0;
         s.renderer = SDL_CreateRenderer(s.window, nullptr);
         if (!s.renderer)
             throw std::runtime_error(SDL_GetError());
@@ -89,6 +101,7 @@ namespace R2MEGA::Window
         s.contextReady = true;
         auto &io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        io.ConfigNavCaptureKeyboard = false;
         io.IniFilename = nullptr;
         ImGui::StyleColorsDark();
         const float scale = std::max(1.0f, SDL_GetDisplayContentScale(SDL_GetPrimaryDisplay()));
@@ -110,7 +123,17 @@ namespace R2MEGA::Window
         SDL_Event event;
         while (SDL_PollEvent(&event))
         {
+            if (s.keyboardDialog.processEvent(event, SDL_GetWindowID(s.window)))
+                continue;
             ImGui_ImplSDL3_ProcessEvent(&event);
+            if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED && event.window.windowID == SDL_GetWindowID(s.window))
+                s.focused = true;
+            if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST && event.window.windowID == SDL_GetWindowID(s.window))
+                s.focused = false;
+            if (event.type == SDL_EVENT_WINDOW_MINIMIZED && event.window.windowID == SDL_GetWindowID(s.window))
+                s.minimized = true;
+            if (event.type == SDL_EVENT_WINDOW_RESTORED && event.window.windowID == SDL_GetWindowID(s.window))
+                s.minimized = false;
             if (event.type == SDL_EVENT_QUIT ||
                 (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && event.window.windowID == SDL_GetWindowID(s.window)))
                 s.running = false;
@@ -118,8 +141,22 @@ namespace R2MEGA::Window
                 !event.key.repeat && event.key.key == SDLK_O && (event.key.mod & SDL_KMOD_CTRL) && !s.files.isOpen() &&
                 !s.aboutOpen)
                 s.files.requestOpen();
+            const bool keyEvent = event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP;
+            if (s.inputCallbacks.event && (!keyEvent || event.key.windowID == SDL_GetWindowID(s.window)))
+                s.inputCallbacks.event(event, acceptsInput());
         }
         return s.running;
+    }
+
+    bool Window::acceptsInput() const
+    {
+        const auto &s = *impl_;
+        if (!s.contextReady || !s.running || !s.focused || s.minimized || s.files.isOpen() ||
+            s.keyboardDialog.active() || s.aboutOpen)
+            return false;
+        const auto &io = ImGui::GetIO();
+        return !io.WantCaptureKeyboard && !io.WantTextInput &&
+               !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
     }
 
     void Window::render()
@@ -140,6 +177,27 @@ namespace R2MEGA::Window
                 ImGui::Separator();
                 if (ImGui::MenuItem("Exit"))
                     s.running = false;
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Input"))
+            {
+                if (ImGui::BeginMenu("Player Controller", s.inputCallbacks.playerUsesJoystick && s.inputCallbacks.setPlayerJoystick))
+                {
+                    for (unsigned player = 0; player < 2; ++player)
+                        if (ImGui::BeginMenu(player ? "Player 2" : "Player 1"))
+                        {
+                            const bool joystick = s.inputCallbacks.playerUsesJoystick(player);
+                            if (ImGui::MenuItem("Keyboard", nullptr, !joystick))
+                                s.inputCallbacks.setPlayerJoystick(player, false);
+                            if (ImGui::MenuItem("Joystick", nullptr, joystick))
+                                s.inputCallbacks.setPlayerJoystick(player, true);
+                            ImGui::EndMenu();
+                        }
+                    ImGui::EndMenu();
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Configure Keyboard..."))
+                    s.keyboardDialog.open();
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("About"))
@@ -216,6 +274,11 @@ namespace R2MEGA::Window
         if (!aboutVisible)
             s.aboutOpen = false;
         s.files.draw();
+        s.keyboardDialog.draw([&](const Systems::KeyboardMapping &mapping)
+                              {
+            if (!s.keyboardConfig.save(mapping)) return false;
+            if (s.inputCallbacks.setKeyboardMapping) s.inputCallbacks.setKeyboardMapping(mapping);
+            return true; });
         ImGui::Render();
         if (!SDL_SetRenderDrawColor(s.renderer, 0, 0, 0, 255) || !SDL_RenderClear(s.renderer))
             throw std::runtime_error(SDL_GetError());
