@@ -39,6 +39,8 @@ namespace R2MEGA::Core
         bool waiting = false;
         bool dataValid = false;
         bool write = false;
+        bool resetAsserted = false;
+        bool addressError = false;
         bool interruptAcknowledge = false;
         unsigned interruptLevel = 0;
     };
