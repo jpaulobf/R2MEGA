@@ -16,6 +16,21 @@ namespace R2MEGA::Core
             return value & 0x80 ? int(value) - 0x100 : int(value);
         }
 
+        std::uint8_t subtractDecimalByte(int target, int source, std::uint16_t sr,
+                                         std::uint16_t &flags)
+        {
+            const int extend = (sr & 0x10) != 0;
+            const int binary = target - source - extend;
+            const int low = (target & 15) - (source & 15) - extend;
+            const int adjusted = binary - (low < 0 ? 6 : 0);
+            const auto result = static_cast<std::uint8_t>(adjusted - (binary < 0 ? 0x60 : 0));
+            // Para dígitos fora de BCD, o empréstimo do ajuste baixo também afeta X e C.
+            const bool overflow = (static_cast<std::uint8_t>(binary) & ~result & 0x80) != 0;
+            flags = (adjusted < 0 ? 0x11 : 0) | (result & 0x80 ? 0x08 : 0) |
+                    ((sr & 0x04) && result == 0 ? 0x04 : 0) | (overflow ? 0x02 : 0);
+            return result;
+        }
+
         struct ShiftResult
         {
             std::uint32_t value = 0;
@@ -185,16 +200,32 @@ namespace R2MEGA::Core
     }
 
     Moto68000::TransferResult Moto68000::transfer(std::uint32_t address, bool byte,
-                                                  bool write, std::uint16_t value, unsigned functionCode)
+                                                  bool write, std::uint16_t value, unsigned functionCode,
+                                                  bool clockAddressError)
     {
         const auto busAddress = address & 0x00ffffff;
         if (!byte && (busAddress & 1))
         {
+            if (clockAddressError)
+            {
+                // A tentativa de acesso ocupa S0-S7 com AS desativado.
+                pins_.address = busAddress & ~1u;
+                pins_.functionCode = functionCode;
+                pins_.write = write;
+                pins_.phase = busPhase_;
+                pins_.addressError = true;
+            }
             bus_.observe(pins_);
+            if (clockAddressError && ++busPhase_ < 4)
+                return TransferResult::Waiting;
             if ((exceptionActive_ && exceptionLongFrame_) || !resetComplete())
                 halted_ = true;
             else
+            {
                 beginFault(3, address, write, functionCode);
+                if (clockAddressError)
+                    exceptionIdle_ -= 3;
+            }
             return TransferResult::Fault;
         }
 
@@ -269,13 +300,15 @@ namespace R2MEGA::Core
             lastException_.addressValid = false;
         }
         exceptionActive_ = true;
+        stopped_ = false;
         exceptionLongFrame_ = longFrame;
+        exceptionShortSequence_ = !longFrame && (vector == 6 || vector == 7 || vector == 8);
         exceptionAccurateAddress_ = false;
         exceptionInstructionContext_ = instructionContext;
         interruptException_ = false;
         interruptAcknowledged_ = false;
         interruptResponse_ = {};
-        exceptionIdle_ = 5;
+        exceptionIdle_ = exceptionShortSequence_ ? 3 : 5;
         exceptionStage_ = 0;
         exceptionVector_ = vector;
         exceptionPc_ = savedPc;
@@ -392,16 +425,21 @@ namespace R2MEGA::Core
                 static_cast<std::uint16_t>(exceptionPc_),
                 static_cast<std::uint16_t>(exceptionPc_ >> 16), exceptionSr_};
             const unsigned longOffsets[] = {2, 6, 4, 8, 10, 14, 12};
-            const std::uint16_t shortWords[] = {
+            const std::uint16_t legacyShortWords[] = {
                 static_cast<std::uint16_t>(exceptionPc_),
                 static_cast<std::uint16_t>(exceptionPc_ >> 16), exceptionSr_};
+            const std::uint16_t shortWords[] = {
+                static_cast<std::uint16_t>(exceptionPc_), exceptionSr_,
+                static_cast<std::uint16_t>(exceptionPc_ >> 16)};
+            const unsigned shortOffsets[] = {2, 4, 0};
             const auto stackAddress = exceptionAccurateAddress_
                                           ? state_.address[7] + exceptionStage_ * 2 - longOffsets[exceptionStage_]
-                                          : state_.address[7] - 2;
+                                          : state_.address[7] - (exceptionShortSequence_ ? shortOffsets[exceptionStage_] : 2);
             const auto result = transfer(stackAddress, false, true,
                                          exceptionLongFrame_ ? (exceptionAccurateAddress_ ? longWords[exceptionStage_]
                                                                                           : legacyLongWords[exceptionStage_])
-                                                             : shortWords[exceptionStage_],
+                                                             : (exceptionShortSequence_ ? shortWords[exceptionStage_]
+                                                                                        : legacyShortWords[exceptionStage_]),
                                          5);
             if (result == TransferResult::Complete)
             {
@@ -422,7 +460,7 @@ namespace R2MEGA::Core
             exceptionTarget_ |= pendingWord_;
         else
             state_.prefetch[read - 2] = pendingWord_;
-        if (exceptionAccurateAddress_ && read == 2)
+        if ((exceptionAccurateAddress_ || exceptionShortSequence_) && read == 2)
             exceptionIdle_ = 2;
         if (++exceptionStage_ == writes + 4)
         {
@@ -538,6 +576,12 @@ namespace R2MEGA::Core
 
     void Moto68000::clockControl()
     {
+        if (controlOp_ == ControlOp::Reset || controlOp_ == ControlOp::Stop ||
+            controlOp_ == ControlOp::TrapOverflow)
+        {
+            clockSystemInstruction();
+            return;
+        }
         const unsigned programCode = state_.sr & 0x2000 ? 6 : 2;
         const unsigned dataCode = state_.sr & 0x2000 ? 5 : 1;
         if (controlExtensionPending_)
@@ -643,6 +687,52 @@ namespace R2MEGA::Core
             tracePending_ = traceInstruction_;
             traceInstruction_ = false;
         }
+    }
+
+    void Moto68000::clockSystemInstruction()
+    {
+        const bool stop = controlOp_ == ControlOp::Stop;
+        if (controlIdle_)
+        {
+            pins_.resetAsserted = controlOp_ == ControlOp::Reset && controlIdle_ <= 124;
+            bus_.observe(pins_);
+            --controlIdle_;
+            if (!stop || controlIdle_)
+                return;
+
+            const std::uint16_t status = state_.prefetch[1] & 0xa71f;
+            if (!(status & 0x2000))
+            {
+                ssp_ = state_.address[7];
+                state_.address[7] = usp_;
+            }
+            state_.sr = status;
+            state_.pc += 4;
+            stopped_ = true;
+        }
+        else
+        {
+            const bool trap = controlOp_ == ControlOp::TrapOverflow && (state_.sr & 2);
+            // A pré-busca de TRAPV tomado já usa o espaço de programa supervisor.
+            const unsigned programCode = trap || (state_.sr & 0x2000) ? 6 : 2;
+            if (transfer(state_.pc + 4, false, false, 0, programCode) != TransferResult::Complete)
+                return;
+            if (trap)
+            {
+                ++state_.instructions;
+                const bool traced = traceInstruction_;
+                beginException(7, state_.pc + 2, false, true);
+                exceptionIdle_ = 0;
+                traceDeferred_ = traced;
+                return;
+            }
+            state_.prefetch = {state_.prefetch[1], pendingWord_};
+            state_.pc += 2;
+        }
+        ++state_.instructions;
+        controlOp_ = ControlOp::None;
+        tracePending_ = traceInstruction_;
+        traceInstruction_ = false;
     }
 
     void Moto68000::clockExtendedMove()
@@ -1060,6 +1150,11 @@ namespace R2MEGA::Core
                                                                                                           : 0xffu;
             const std::uint32_t sign = op.addressDestination || op.size == 4 ? 0x80000000u : op.size == 2 ? 0x8000u
                                                                                                           : 0x80u;
+            if (op.unary == Arithmetic::Unary::NegateDecimal)
+            {
+                op.result = subtractDecimalByte(0, op.operand & 0xff, state_.sr, op.flags);
+                return;
+            }
             if (op.unary != Arithmetic::Unary::None)
             {
                 const std::uint32_t value = op.operand & mask;
@@ -1101,6 +1196,33 @@ namespace R2MEGA::Core
                        (op.result == 0 ? 0x04 : 0) | (overflow ? 0x02 : 0);
         };
 
+        const auto operandReady = [&]()
+        {
+            if (!op.checkBounds)
+            {
+                calculate();
+                op.phase = Arithmetic::Phase::Prefetch;
+                return;
+            }
+            const int value = signedWord(static_cast<std::uint16_t>(state_.data[op.dataReg]));
+            const int bound = signedWord(static_cast<std::uint16_t>(op.operand));
+            op.flags = (value < 0 ? 0x08 : 0) | (value == 0 ? 0x04 : 0);
+            if (value > bound || value < 0)
+            {
+                state_.sr = (state_.sr & ~std::uint16_t(0x0f)) | op.flags;
+                // O caminho que chega à comparação com zero usa dois ciclos adicionais.
+                const bool checkNegative = value < 0 && value <= bound && value - bound >= -0x8000;
+                ++state_.instructions;
+                const bool traced = traceInstruction_;
+                beginException(6, state_.pc + 2 + op.extensions * 2, false, true);
+                exceptionIdle_ = checkNegative ? 10 : 8;
+                traceDeferred_ = traced;
+                return;
+            }
+            op.idle = 6;
+            op.phase = Arithmetic::Phase::Internal;
+        };
+
         const auto finish = [&]()
         {
             if (op.compareOnly)
@@ -1131,6 +1253,12 @@ namespace R2MEGA::Core
             switch (op.phase)
             {
             case Arithmetic::Phase::Extensions:
+                if (op.leadingIdle)
+                {
+                    --op.leadingIdle;
+                    bus_.observe(pins_);
+                    return;
+                }
                 if (op.fetchesLeft)
                 {
                     if (transfer(state_.pc + op.streamIndex * 2, false, false, 0,
@@ -1166,8 +1294,12 @@ namespace R2MEGA::Core
                     op.operand = op.mode == 0 ? state_.data[op.reg] : op.mode == 1 ? state_.address[op.reg]
                                                                   : op.size == 4   ? (std::uint32_t(op.extension[0]) << 16) | op.extension[1]
                                                                                    : op.extension[0];
-                    calculate();
-                    op.phase = Arithmetic::Phase::Prefetch;
+                    operandReady();
+                    if (exceptionActive_)
+                    {
+                        clockException();
+                        return;
+                    }
                     continue;
                 }
                 if (!op.addressReady)
@@ -1186,7 +1318,8 @@ namespace R2MEGA::Core
                              !op.memoryDestination && op.mode == 7 &&
                                      (op.reg == 2 || op.reg == 3)
                                  ? programCode
-                                 : dataCode) == TransferResult::Complete)
+                                 : dataCode,
+                             op.checkBounds) == TransferResult::Complete)
                 {
                     const std::uint32_t part = op.size == 1 ? pendingByte_ : pendingWord_;
                     op.operand = op.size == 4 && op.reads == 0 ? part << 16 : op.operand | part;
@@ -1194,10 +1327,15 @@ namespace R2MEGA::Core
                     {
                         if (op.mode == 3 && op.size != 2)
                             state_.address[op.reg] += step;
-                        calculate();
-                        op.phase = Arithmetic::Phase::Prefetch;
+                        operandReady();
                     }
                 }
+                return;
+
+            case Arithmetic::Phase::Internal:
+                if (--op.idle == 0)
+                    op.phase = Arithmetic::Phase::Prefetch;
+                bus_.observe(pins_);
                 return;
 
             case Arithmetic::Phase::Prefetch:
@@ -1207,8 +1345,19 @@ namespace R2MEGA::Core
                 op.nextFollowing = pendingWord_;
                 if (op.memoryDestination && op.mode != 0 && !op.compareOnly)
                     op.phase = Arithmetic::Phase::Write;
+                else if (op.unary == Arithmetic::Unary::NegateDecimal)
+                {
+                    op.idle = 2;
+                    op.phase = Arithmetic::Phase::FinalIdle;
+                }
                 else
                     finish();
+                return;
+
+            case Arithmetic::Phase::FinalIdle:
+                if (--op.idle == 0)
+                    finish();
+                bus_.observe(pins_);
                 return;
 
             case Arithmetic::Phase::Write:
@@ -1479,6 +1628,11 @@ namespace R2MEGA::Core
             const std::uint32_t extend = !op.compareMemory && (state_.sr & 0x10) ? 1u : 0u;
             if (op.decimal)
             {
+                if (op.subtract)
+                {
+                    op.result = subtractDecimalByte(lhs, rhs, state_.sr, op.flags);
+                    return;
+                }
                 // Ajusta os dois dígitos decimais; Z é acumulado entre bytes.
                 const unsigned low = (lhs & 15) + (rhs & 15) + extend;
                 unsigned sum = lhs + rhs + extend + (low > 9 ? 6 : 0);
@@ -1601,8 +1755,19 @@ namespace R2MEGA::Core
                 op.nextFollowing = pendingWord_;
                 if (op.memory && !op.compareMemory)
                     op.phase = ExtendedArithmetic::Phase::Write;
+                else if (op.decimal && op.subtract)
+                {
+                    op.idle = 2;
+                    op.phase = ExtendedArithmetic::Phase::FinalIdle;
+                }
                 else
                     finish();
+                return;
+
+            case ExtendedArithmetic::Phase::FinalIdle:
+                if (--op.idle == 0)
+                    finish();
+                bus_.observe(pins_);
                 return;
 
             case ExtendedArithmetic::Phase::Write:
@@ -2479,9 +2644,9 @@ namespace R2MEGA::Core
         statusMove_ = {};
         frame_ = {};
         pendingByte_ = 0;
-        halted_ = false;
+        halted_ = stopped_ = false;
         exceptionActive_ = false;
-        exceptionLongFrame_ = false;
+        exceptionLongFrame_ = exceptionShortSequence_ = false;
         exceptionAccurateAddress_ = false;
         exceptionInstructionContext_ = false;
         interruptException_ = interruptAcknowledged_ = false;
@@ -2500,6 +2665,24 @@ namespace R2MEGA::Core
         interruptLevel_ = 0;
         level7EdgePending_ = false;
         traceInstruction_ = tracePending_ = traceDeferred_ = false;
+    }
+
+    void Moto68000::restoreInstructionBoundary(const State &state, std::uint32_t usp, std::uint32_t ssp)
+    {
+        reset();
+        state_ = state;
+        usp_ = usp;
+        ssp_ = ssp;
+        state_.address[7] = state_.sr & 0x2000 ? ssp : usp;
+        resetRead_ = 6;
+    }
+
+    bool Moto68000::atInstructionBoundary() const
+    {
+        return resetComplete() && !halted_ && busPhase_ == 0 &&
+               !exceptionActive_ && !returnActive_ && !sccActive_ &&
+               !branchActive_ && !quickLongActive_ &&
+               controlOp_ == ControlOp::None && memoryOp_ == MemoryOp::None;
     }
 
     void Moto68000::clock()
@@ -2636,10 +2819,33 @@ namespace R2MEGA::Core
             }
         }
 
+        if (stopped_)
+        {
+            bus_.observe(pins_);
+            return;
+        }
+
         if (resetComplete() && !branchActive_ && !quickLongActive_ && memoryOp_ == MemoryOp::None && busPhase_ == 0)
         {
             traceInstruction_ = (state_.sr & 0x8000) != 0;
             const auto opcode = state_.prefetch[0];
+            if (opcode == 0x4e70 || opcode == 0x4e72 || opcode == 0x4e76)
+            {
+                if (opcode != 0x4e76 && !(state_.sr & 0x2000))
+                {
+                    beginException(8, state_.pc, false);
+                    bus_.observe(pins_);
+                    return;
+                }
+                controlOp_ = opcode == 0x4e70   ? ControlOp::Reset
+                             : opcode == 0x4e72 ? ControlOp::Stop
+                                                : ControlOp::TrapOverflow;
+                controlIdle_ = opcode == 0x4e70 ? 128 : opcode == 0x4e72 ? 4
+                                                                         : 0;
+                controlIr_ = opcode;
+                clockSystemInstruction();
+                return;
+            }
             if (opcode == 0x4e73 || opcode == 0x4e77)
             {
                 if (opcode == 0x4e73 && !(state_.sr & 0x2000))
@@ -2855,6 +3061,32 @@ namespace R2MEGA::Core
                 clockArithmetic();
                 return;
             }
+            else if ((opcode & 0xf1c0) == 0x4180)
+            {
+                auto &op = arithmetic_;
+                op = {};
+                op.checkBounds = op.compareOnly = true;
+                op.mode = (opcode >> 3) & 7;
+                op.reg = opcode & 7;
+                op.dataReg = (opcode >> 9) & 7;
+                if (op.mode == 1 || (op.mode == 7 && op.reg > 4))
+                {
+                    beginException(4, state_.pc, false);
+                    bus_.observe(pins_);
+                    return;
+                }
+                op.extensions = op.mode >= 5 ? moveExtensionWords(op.mode, op.reg, 2) : 0;
+                op.fetchesLeft = op.extensions;
+                op.leadingIdle = op.mode == 6 || (op.mode == 7 && op.reg == 3) ? 2 : 0;
+                op.idle = op.mode == 4 ? 2 : 0;
+                if (op.extensions)
+                    op.extension[0] = state_.prefetch[1];
+                else
+                    op.nextOpcode = state_.prefetch[1];
+                memoryOp_ = MemoryOp::Arithmetic;
+                clockArithmetic();
+                return;
+            }
             else if ((opcode & 0xf1c0) == 0xc0c0 ||
                      (opcode & 0xf1c0) == 0xc1c0 ||
                      (opcode & 0xf1c0) == 0x80c0 ||
@@ -3017,15 +3249,18 @@ namespace R2MEGA::Core
                 clockExtendedArithmetic();
                 return;
             }
-            else if (((opcode & 0xff00) == 0x4000 ||
-                      (opcode & 0xff00) == 0x4400 ||
-                      (opcode & 0xff00) == 0x4600) &&
-                     ((opcode >> 6) & 3) != 3)
+            else if ((opcode & 0xffc0) == 0x4800 ||
+                     (((opcode & 0xff00) == 0x4000 ||
+                       (opcode & 0xff00) == 0x4400 ||
+                       (opcode & 0xff00) == 0x4600) &&
+                      ((opcode >> 6) & 3) != 3))
             {
                 auto &op = arithmetic_;
                 op = {};
-                op.unary = (opcode & 0xff00) == 0x4000 ? Arithmetic::Unary::NegateExtend : (opcode & 0xff00) == 0x4400 ? Arithmetic::Unary::Negate
-                                                                                                                       : Arithmetic::Unary::Complement;
+                op.unary = (opcode & 0xffc0) == 0x4800   ? Arithmetic::Unary::NegateDecimal
+                           : (opcode & 0xff00) == 0x4000 ? Arithmetic::Unary::NegateExtend
+                           : (opcode & 0xff00) == 0x4400 ? Arithmetic::Unary::Negate
+                                                         : Arithmetic::Unary::Complement;
                 const unsigned sizeCode = (opcode >> 6) & 3;
                 op.size = sizeCode == 0 ? 1 : sizeCode == 1 ? 2
                                                             : 4;
@@ -3043,6 +3278,11 @@ namespace R2MEGA::Core
                 op.extensions = op.mode >= 5 ? moveExtensionWords(op.mode, op.reg, op.size) : 0;
                 op.fetchesLeft = op.extensions;
                 op.idle = op.mode == 4 || op.mode == 6 ? 2 : 0;
+                if (op.unary == Arithmetic::Unary::NegateDecimal && op.mode == 6)
+                {
+                    op.leadingIdle = op.idle;
+                    op.idle = 0;
+                }
                 if (op.mode == 0 && op.size == 4)
                     op.idle += 2;
                 if (op.extensions)
@@ -3391,16 +3631,17 @@ namespace R2MEGA::Core
                 clockArithmetic();
                 return;
             }
-            else if ((opcode & 0xf1f0) == 0xc100)
+            else if ((opcode & 0xf1f0) == 0xc100 || (opcode & 0xf1f0) == 0x8100)
             {
                 auto &op = extendedArithmetic_;
                 op = {};
                 op.decimal = true;
+                op.subtract = (opcode & 0xf000) == 0x8000;
                 op.memory = (opcode & 8) != 0;
                 op.size = 1;
                 op.sourceReg = opcode & 7;
                 op.targetReg = (opcode >> 9) & 7;
-                op.idle = 2;
+                op.idle = op.subtract && !op.memory ? 0 : 2;
                 op.nextOpcode = state_.prefetch[1];
                 memoryOp_ = MemoryOp::ExtendedArithmetic;
                 clockExtendedArithmetic();

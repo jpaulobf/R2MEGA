@@ -42,6 +42,11 @@ namespace R2MEGA::Core
         void clock();
         // Nível presente nas entradas IPL; zero remove o pedido.
         void setInterruptLevel(unsigned level);
+        // Restaura um estado entre instruções, com a fila de pré-busca já carregada.
+        void restoreInstructionBoundary(const State &state, std::uint32_t usp, std::uint32_t ssp);
+        bool atInstructionBoundary() const;
+        std::uint32_t userStackPointer() const { return state_.sr & 0x2000 ? usp_ : state_.address[7]; }
+        std::uint32_t supervisorStackPointer() const { return state_.sr & 0x2000 ? state_.address[7] : ssp_; }
         const State &state() const { return state_; }
         const M68KPins &pins() const { return pins_; }
         const ExceptionEvent &lastException() const { return lastException_; }
@@ -49,6 +54,7 @@ namespace R2MEGA::Core
         bool resetVectorsLoaded() const { return active_ && resetRead_ >= 4; }
         bool resetComplete() const { return active_ && resetRead_ == 6; }
         bool halted() const { return halted_; }
+        bool stopped() const { return stopped_; }
 
     private:
         enum class TransferResult
@@ -58,7 +64,8 @@ namespace R2MEGA::Core
             Fault
         };
         TransferResult transfer(std::uint32_t address, bool byte, bool write,
-                                std::uint16_t value, unsigned functionCode);
+                                std::uint16_t value, unsigned functionCode,
+                                bool clockAddressError = false);
         void beginException(unsigned vector, std::uint32_t savedPc, bool longFrame,
                             bool instructionContext = false);
         void beginFault(unsigned vector, std::uint32_t address, bool write,
@@ -67,6 +74,7 @@ namespace R2MEGA::Core
         void clockInterruptAcknowledge();
         void clockReturn();
         void clockControl();
+        void clockSystemInstruction();
         void clockExtendedMove();
         void clockCombinedMove();
         void finishCombinedMove();
@@ -116,7 +124,10 @@ namespace R2MEGA::Core
             Jsr,
             Jmp,
             Rts,
-            Pea
+            Pea,
+            Reset,
+            Stop,
+            TrapOverflow
         };
         ControlOp controlOp_ = ControlOp::None;
         unsigned controlStage_ = 0;
@@ -248,6 +259,7 @@ namespace R2MEGA::Core
                 None,
                 Negate,
                 NegateExtend,
+                NegateDecimal,
                 Complement
             };
             enum class Phase
@@ -255,7 +267,9 @@ namespace R2MEGA::Core
                 Extensions,
                 Idle,
                 Read,
+                Internal,
                 Prefetch,
+                FinalIdle,
                 Write
             };
             Phase phase = Phase::Extensions;
@@ -263,10 +277,11 @@ namespace R2MEGA::Core
             Unary unary = Unary::None;
             bool subtract = false, addressDestination = false, memoryDestination = false;
             bool immediateInstruction = false, quickInstruction = false, compareOnly = false;
+            bool checkBounds = false;
             unsigned size = 2, mode = 0, reg = 0, dataReg = 0;
             unsigned quickCount = 0;
             unsigned extensions = 0, immediateWords = 0, fetchesLeft = 0, streamIndex = 2;
-            unsigned idle = 0, reads = 0, writes = 0;
+            unsigned leadingIdle = 0, idle = 0, reads = 0, writes = 0;
             bool addressReady = false;
             std::array<std::uint16_t, 4> extension{};
             std::uint16_t nextOpcode = 0, nextFollowing = 0;
@@ -294,7 +309,7 @@ namespace R2MEGA::Core
             std::uint16_t nextOpcode = 0, nextFollowing = 0, source = 0;
             std::uint32_t address = 0, result = 0;
         } multiplyDivide_;
-        // ADDX/SUBX, ABCD e CMPM leem a origem antes do destino.
+        // ADDX/SUBX, ABCD/SBCD e CMPM leem a origem antes do destino.
         struct ExtendedArithmetic
         {
             enum class Phase
@@ -303,6 +318,7 @@ namespace R2MEGA::Core
                 SourceRead,
                 TargetRead,
                 Prefetch,
+                FinalIdle,
                 Write
             };
             Phase phase = Phase::Idle;
@@ -441,8 +457,10 @@ namespace R2MEGA::Core
         } frame_;
         std::uint8_t pendingByte_ = 0;
         bool halted_ = false;
+        bool stopped_ = false;
         bool exceptionActive_ = false;
         bool exceptionLongFrame_ = false;
+        bool exceptionShortSequence_ = false;
         bool exceptionAccurateAddress_ = false;
         bool exceptionInstructionContext_ = false;
         bool interruptException_ = false;
