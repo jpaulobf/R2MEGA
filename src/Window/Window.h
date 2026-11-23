@@ -66,6 +66,7 @@ namespace R2MEGA::Window
         {
             std::function<void()> togglePause;
             std::function<bool()> isPaused;
+            std::function<double()> fps;
         };
 
         explicit Window(OpenHandler openHandler = {}, VideoProvider videoProvider = {}, RunningProvider runningProvider = {},
@@ -85,6 +86,9 @@ namespace R2MEGA::Window
         bool processEvents();
         // Bloqueia a entrada de jogo enquanto a janela ou um diálogo captura o teclado.
         bool acceptsInput() const;
+        bool fastForwardEnabled() const;
+        // Aplica a preferência do menu, suspensa durante o avanço rápido, e retorna o VSync efetivo.
+        bool synchronizeVSync(bool fastForward);
         void render();
 
     private:

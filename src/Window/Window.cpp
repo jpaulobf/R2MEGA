@@ -7,6 +7,7 @@
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_sdlrenderer3.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <stdexcept>
 #include <utility>
@@ -15,12 +16,15 @@ namespace R2MEGA::Window
 {
     struct Window::Impl
     {
+        static constexpr char applicationTitle[] = "R2MEGA v." R2_APP_VERSION;
         SDL_Window *window = nullptr;
         SDL_Renderer *renderer = nullptr;
         SDL_Texture *videoTexture = nullptr;
         bool sdlReady = false, contextReady = false, platformReady = false, rendererReady = false;
         bool running = true;
         bool aboutOpen = false;
+        bool debugVisible = false;
+        std::string romName, title;
         OpenHandler openHandler;
         VideoProvider videoProvider;
         RunningProvider runningProvider;
@@ -31,6 +35,8 @@ namespace R2MEGA::Window
         KeyboardConfig keyboardConfig;
         KeyboardDialog keyboardDialog;
         bool focused = false, minimized = false;
+        bool vsyncEnabled = true, fastForwardEnabled = true;
+        bool vsyncActive = false;
         explicit Impl(OpenHandler handler, VideoProvider video,
                       RunningProvider running, VideoStatusProvider status, InputCallbacks input,
                       EmulationCallbacks emulation)
@@ -40,9 +46,21 @@ namespace R2MEGA::Window
               files([this](const std::filesystem::path &path)
                     {
                 if (!openHandler) throw std::runtime_error("ROM loading is unavailable.");
-                const auto name = openHandler(path);
-                const auto title = std::string("R2MEGA v." R2_APP_VERSION " | ") + name;
-                SDL_SetWindowTitle(window, title.c_str()); }) {}
+                romName = openHandler(path); }) {}
+
+        void updateTitle()
+        {
+            const double measured = emulationCallbacks.fps ? emulationCallbacks.fps() : 0;
+            const double fps = std::isfinite(measured) && measured >= 0 ? measured : 0;
+            char prefix[96];
+            std::snprintf(prefix, sizeof(prefix), "%s | FPS: %.2f", applicationTitle, fps);
+            std::string next = prefix;
+            if (!romName.empty())
+                next += " | " + romName;
+            if (next != title && SDL_SetWindowTitle(window, next.c_str()))
+                title = std::move(next);
+        }
+
         ~Impl()
         {
             if (rendererReady)
@@ -81,10 +99,11 @@ namespace R2MEGA::Window
         s.keyboardDialog.setMapping(s.keyboardConfig.load());
         if (s.inputCallbacks.setKeyboardMapping)
             s.inputCallbacks.setKeyboardMapping(s.keyboardDialog.mapping());
-        s.window = SDL_CreateWindow("R2MEGA v." R2_APP_VERSION, 960, 672,
+        s.window = SDL_CreateWindow(Impl::applicationTitle, 960, 672,
                                     SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
         if (!s.window)
             throw std::runtime_error(SDL_GetError());
+        s.updateTitle();
         s.focused = (SDL_GetWindowFlags(s.window) & SDL_WINDOW_INPUT_FOCUS) != 0;
         s.renderer = SDL_CreateRenderer(s.window, nullptr);
         if (!s.renderer)
@@ -97,8 +116,7 @@ namespace R2MEGA::Window
                 throw std::runtime_error(SDL_GetError());
             SDL_SetTextureScaleMode(s.videoTexture, SDL_SCALEMODE_NEAREST);
         }
-        if (!SDL_SetRenderVSync(s.renderer, 1))
-            throw std::runtime_error(SDL_GetError());
+        synchronizeVSync(false);
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         s.contextReady = true;
@@ -147,6 +165,9 @@ namespace R2MEGA::Window
             if (event.type == SDL_EVENT_KEY_DOWN && event.key.windowID == SDL_GetWindowID(s.window) &&
                 !event.key.repeat && event.key.key == SDLK_PAUSE && s.emulationCallbacks.togglePause)
                 s.emulationCallbacks.togglePause();
+            if (event.type == SDL_EVENT_KEY_DOWN && event.key.windowID == SDL_GetWindowID(s.window) &&
+                !event.key.repeat && event.key.key == SDLK_F1)
+                s.debugVisible = !s.debugVisible;
             const bool keyEvent = event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP;
             if (s.inputCallbacks.event && (!keyEvent || event.key.windowID == SDL_GetWindowID(s.window)))
                 s.inputCallbacks.event(event, acceptsInput());
@@ -164,6 +185,32 @@ namespace R2MEGA::Window
         const auto &io = ImGui::GetIO();
         return !io.WantCaptureKeyboard && !io.WantTextInput &&
                !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+    }
+
+    bool Window::fastForwardEnabled() const
+    {
+        return impl_->fastForwardEnabled;
+    }
+
+    bool Window::synchronizeVSync(bool fastForward)
+    {
+        auto &s = *impl_;
+        if (!s.renderer)
+            throw std::logic_error("Open the window before configuring VSync.");
+        const bool enabled = s.vsyncEnabled && !fastForward && !s.minimized;
+        if (enabled != s.vsyncActive)
+        {
+            if (SDL_SetRenderVSync(s.renderer, enabled ? 1 : SDL_RENDERER_VSYNC_DISABLED))
+                s.vsyncActive = enabled;
+            else if (!enabled)
+                throw std::runtime_error(SDL_GetError());
+            else
+            {
+                std::fprintf(stderr, "R2MEGA: VSync indisponível: %s\n", SDL_GetError());
+                s.vsyncEnabled = false;
+            }
+        }
+        return s.vsyncActive;
     }
 
     void Window::render()
@@ -184,6 +231,11 @@ namespace R2MEGA::Window
                 ImGui::Separator();
                 if (ImGui::MenuItem("Exit"))
                     s.running = false;
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Display"))
+            {
+                ImGui::MenuItem("VSync", nullptr, &s.vsyncEnabled);
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Input"))
@@ -207,6 +259,11 @@ namespace R2MEGA::Window
                     s.keyboardDialog.open();
                 ImGui::EndMenu();
             }
+            if (ImGui::BeginMenu("Hacks"))
+            {
+                ImGui::MenuItem("Enable Fast-Forward", "Tab (hold)", &s.fastForwardEnabled);
+                ImGui::EndMenu();
+            }
             if (ImGui::BeginMenu("About"))
             {
                 openAbout = ImGui::MenuItem("About R2MEGA");
@@ -224,7 +281,7 @@ namespace R2MEGA::Window
         auto *background = ImGui::GetBackgroundDrawList();
         const auto status = pixels && s.videoStatusProvider ? s.videoStatusProvider() : VideoStatus{};
         const unsigned videoWidth = std::clamp(status.width, 1u, 320u);
-        if (pixels && s.videoStatusProvider)
+        if (s.debugVisible && pixels && s.videoStatusProvider)
         {
             char counter[96];
             std::snprintf(counter, sizeof(counter), "Quadro: %llu  |  PC: $%06X",
@@ -333,6 +390,7 @@ namespace R2MEGA::Window
             if (!s.keyboardConfig.save(mapping)) return false;
             if (s.inputCallbacks.setKeyboardMapping) s.inputCallbacks.setKeyboardMapping(mapping);
             return true; });
+        s.updateTitle();
         ImGui::Render();
         if (!SDL_SetRenderDrawColor(s.renderer, 0, 0, 0, 255) || !SDL_RenderClear(s.renderer))
             throw std::runtime_error(SDL_GetError());
