@@ -24,6 +24,7 @@ namespace R2MEGA::Systems
         void setKeyboardMapping(const KeyboardMapping &mapping);
         void setPlayerJoystick(unsigned player, bool enabled);
         bool playerUsesJoystick(unsigned player) const;
+        bool fastForwardPressed() const { return fastForwardPressed_; }
         std::size_t gamepadCount() const { return gamepads_.size(); }
 
     private:
@@ -46,5 +47,6 @@ namespace R2MEGA::Systems
         std::map<SDL_JoystickID, Device> gamepads_;
         bool playerJoystick_[2]{};
         bool initialized_ = false;
+        bool fastForwardPressed_ = false;
     };
 }

@@ -38,7 +38,11 @@ namespace R2MEGA::Systems
         initialized_ = false;
     }
 
-    void Input::clear() { pressedKeys_.clear(); }
+    void Input::clear()
+    {
+        pressedKeys_.clear();
+        fastForwardPressed_ = false;
+    }
 
     void Input::setKeyboardMapping(const KeyboardMapping &mapping)
     {
@@ -123,11 +127,19 @@ namespace R2MEGA::Systems
                 discoverGamepads();
         }
         else if (event.type == SDL_EVENT_KEY_UP)
+        {
             pressedKeys_.erase(event.key.key);
+            if (event.key.key == SDLK_TAB)
+                fastForwardPressed_ = false;
+        }
         else if (event.type == SDL_EVENT_KEY_DOWN && enabled && !event.key.repeat &&
-                 !(event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)) &&
-                 keyMap_.count(event.key.key))
-            pressedKeys_.insert(event.key.key);
+                 !(event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_GUI)))
+        {
+            if (event.key.key == SDLK_TAB)
+                fastForwardPressed_ = true;
+            if (keyMap_.count(event.key.key))
+                pressedKeys_.insert(event.key.key);
+        }
         if (!enabled || event.type == SDL_EVENT_WINDOW_FOCUS_LOST || event.type == SDL_EVENT_WINDOW_MINIMIZED)
             clear();
     }

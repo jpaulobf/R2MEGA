@@ -15,7 +15,7 @@ namespace R2MEGA::Systems
 
     inline bool assignableKey(SDL_Keycode key)
     {
-        if (!key || key == SDLK_ESCAPE || key == SDLK_TAB || key == SDLK_PAUSE ||
+        if (!key || key == SDLK_ESCAPE || key == SDLK_TAB || key == SDLK_PAUSE || key == SDLK_F1 ||
             (key >= SDLK_F5 && key <= SDLK_F12) || key == SDLK_LCTRL || key == SDLK_RCTRL ||
             key == SDLK_LALT || key == SDLK_RALT || key == SDLK_LGUI || key == SDLK_RGUI)
             return false;
