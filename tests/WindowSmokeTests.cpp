@@ -1,4 +1,5 @@
 #include "Window/Window.h"
+#include "Systems/FrameCounter.h"
 #include "Systems/Input.h"
 #include <SDL3/SDL.h>
 #include <imgui.h>
@@ -57,14 +58,30 @@ namespace
         try
         {
             int attempts = 0;
+            using namespace std::chrono;
+            using Counter = R2MEGA::Systems::FrameCounter;
+            const auto start = Counter::Clock::time_point{};
+            Counter counter(start);
+            R2MEGA::Window::Window::EmulationCallbacks emulation;
+            emulation.fps = [&counter]()
+            { return counter.fps(); };
             R2MEGA::Window::Window window([&](const std::filesystem::path &path)
                                           {
                 ++attempts;
                 require(path.filename() == "game.bin", "Unexpected selected file");
                 if (attempts == 1) throw std::runtime_error("Test load failure");
-                return std::string("game.bin"); });
+                counter.reset(start);
+                return std::string("game.bin"); }, {}, {}, {}, {}, std::move(emulation));
             window.open();
             window.processEvents();
+            int count = 0;
+            SDL_Window **windows = SDL_GetWindows(&count);
+            require(windows && count == 1, "Expected one SDL window");
+            auto *native = windows[0];
+            SDL_free(windows);
+            const auto title = [native]()
+            { return std::string(SDL_GetWindowTitle(native)); };
+            require(title().find(" | FPS: 0.00") != std::string::npos, "Idle title must report zero FPS");
             activateMenu(window, "Open...");
             auto selectRom = [&]
             {
@@ -81,16 +98,32 @@ namespace
             selectRom();
             require(attempts == 1 && ImGui::FindWindowByName("Open ROM")->Active,
                     "Failed loading must leave the browser open");
+            require(title().find("game.bin") == std::string::npos, "Failed loading must leave the title intact");
             selectRom();
             require(attempts == 2, "Selecting a ROM must invoke the loading callback");
             window.render();
             require(!ImGui::FindWindowByName("Open ROM")->Active, "Successful loading must close the browser");
-            int count = 0;
-            SDL_Window **windows = SDL_GetWindows(&count);
-            require(windows && count == 1, "Expected one SDL window");
-            const std::string title = SDL_GetWindowTitle(windows[0]);
-            SDL_free(windows);
-            require(title.find("game.bin") != std::string::npos, "Loaded ROM name must appear in the title");
+            require(title().find(" | FPS: 0.00 | game.bin") != std::string::npos,
+                    "Loaded ROM name must appear after the reset FPS counter");
+
+            for (unsigned frame = 1; frame <= 30; ++frame)
+                counter.record(start + nanoseconds(frame * 500000000ull / 30));
+            window.render();
+            require(title().find(" | FPS: 60.00 | game.bin") != std::string::npos,
+                    "Native title must show the measured FPS before the ROM name");
+            for (unsigned frame = 1; frame <= 120; ++frame)
+                counter.record(start + milliseconds(500) + nanoseconds(frame * 500000000ull / 120));
+            window.render();
+            require(title().find(" | FPS: 240.00 | game.bin") != std::string::npos,
+                    "FPS must count all emulated frames, including frames between presentations");
+            counter.excludePause(seconds(5));
+            window.render();
+            require(title().find(" | FPS: 240.00 | game.bin") != std::string::npos,
+                    "The title must preserve the last FPS while paused");
+            counter.record(start + seconds(6) + milliseconds(5));
+            window.render();
+            require(title().find(" | FPS: 200.00 | game.bin") != std::string::npos,
+                    "The next sample must exclude time spent paused");
         }
         catch (...)
         {
@@ -119,15 +152,48 @@ namespace
         std::array<std::uint32_t, 320 * 224> pixels{};
         pixels.fill(0xff123456);
         int reads = 0;
+        using Window = R2MEGA::Window::Window;
+        Window::EmulationCallbacks emulation;
+        emulation.isPaused = []()
+        { return true; };
         R2MEGA::Window::Window window({}, [&]()
                                       {
                                           ++reads;
-                                          return pixels.data(); });
+                                          return pixels.data(); }, {}, []()
+                                      { return Window::VideoStatus{}; }, {}, std::move(emulation));
         window.open();
+        window.processEvents();
         window.render();
         require(reads == 1, "Main window must request the VDP framebuffer");
         auto *video = ImGui::FindWindowByName("Saída da VDP");
         require(!video || !video->Active, "VDP must not open a secondary window");
+        const auto debugDrawn = []()
+        { return ImGui::GetBackgroundDrawList()->VtxBuffer.Size > 0; };
+        require(!debugDrawn(), "Debug overlay must be hidden by default");
+
+        int count = 0;
+        SDL_Window **windows = SDL_GetWindows(&count);
+        require(windows && count == 1, "Expected one SDL window for the debug shortcut");
+        const auto id = SDL_GetWindowID(windows[0]);
+        SDL_free(windows);
+        SDL_Event key{};
+        key.type = SDL_EVENT_KEY_DOWN;
+        key.key.key = SDLK_F1;
+        const auto press = [&](SDL_WindowID windowId, bool repeat = false)
+        {
+            key.key.windowID = windowId;
+            key.key.repeat = repeat;
+            require(SDL_PushEvent(&key) && window.processEvents(), "Could not process F1");
+            window.render();
+        };
+        press(id);
+        require(debugDrawn(), "F1 must show the debug overlay even while paused");
+        press(id, true);
+        require(debugDrawn(), "Key repeat must not toggle the debug overlay");
+        press(id + 1000);
+        require(debugDrawn(), "F1 from another window must not toggle the overlay");
+        press(id);
+        require(!debugDrawn(), "A second F1 press must hide the debug overlay");
     }
 
     void testInputMenu()
@@ -276,6 +342,91 @@ namespace
         require(!paused, "Pause/Break must resume emulation");
         require(window.acceptsInput(), "Resuming must allow game input");
     }
+
+    void testSpeedControls()
+    {
+        R2MEGA::Systems::Input input;
+        R2MEGA::Window::Window::InputCallbacks callbacks;
+        callbacks.event = [&](const SDL_Event &event, bool enabled)
+        { input.handleEvent(event, enabled); };
+        R2MEGA::Window::Window window({}, {}, {}, {}, std::move(callbacks));
+        window.open();
+        window.processEvents();
+
+        int count = 0;
+        SDL_Window **windows = SDL_GetWindows(&count);
+        require(windows && count == 1, "Expected one SDL window for speed controls");
+        const auto id = SDL_GetWindowID(windows[0]);
+        auto *renderer = SDL_GetRenderer(windows[0]);
+        SDL_free(windows);
+        require(renderer != nullptr, "Speed controls require an SDL renderer");
+        require(window.fastForwardEnabled(), "Fast-forward must be enabled by default");
+        const auto checkMode = [&](const char *scenario, bool fastExpected, int vsyncExpected)
+        {
+            input.update(window.acceptsInput());
+            const bool fast = window.fastForwardEnabled() && input.fastForwardPressed();
+            int vsync = 0;
+            if (fast != fastExpected || window.synchronizeVSync(fast) != (vsyncExpected == 1) ||
+                !SDL_GetRenderVSync(renderer, &vsync) || vsync != vsyncExpected)
+                throw std::runtime_error(std::string("Unexpected speed mode for ") + scenario);
+        };
+        const auto focus = [&](SDL_EventType type)
+        {
+            SDL_Event event{};
+            event.type = type;
+            event.window.windowID = id;
+            require(SDL_PushEvent(&event) && window.processEvents(), "Could not process focus event");
+        };
+        const auto tab = [&](SDL_EventType type, SDL_Keymod mod = SDL_KMOD_NONE)
+        {
+            SDL_Event event{};
+            event.type = type;
+            event.key.windowID = id;
+            event.key.key = SDLK_TAB;
+            event.key.scancode = SDL_SCANCODE_TAB;
+            event.key.mod = mod;
+            require(SDL_PushEvent(&event) && window.processEvents(), "Could not process Tab event");
+        };
+
+        focus(SDL_EVENT_WINDOW_FOCUS_GAINED);
+        checkMode("default settings", false, 1);
+        tab(SDL_EVENT_KEY_DOWN, SDL_KMOD_ALT);
+        checkMode("Alt+Tab", false, 1);
+        tab(SDL_EVENT_KEY_UP);
+        tab(SDL_EVENT_KEY_DOWN);
+        checkMode("Tab held with VSync enabled", true, 0);
+        window.render();
+        window.processEvents();
+        checkMode("Tab still held after presenting a frame", true, 0);
+        tab(SDL_EVENT_KEY_UP);
+        checkMode("Tab released with VSync enabled", false, 1);
+
+        activateMenu(window, "Enable Fast-Forward", "Hacks");
+        require(!window.fastForwardEnabled(), "Hacks must toggle fast-forward");
+        window.render();
+        tab(SDL_EVENT_KEY_DOWN);
+        checkMode("Tab held with fast-forward disabled", false, 1);
+        tab(SDL_EVENT_KEY_UP);
+
+        activateMenu(window, "VSync", "Display");
+        checkMode("VSync unchecked", false, 0);
+        activateMenu(window, "Enable Fast-Forward", "Hacks");
+        require(window.fastForwardEnabled(), "Hacks must re-enable fast-forward");
+        window.render();
+        tab(SDL_EVENT_KEY_DOWN);
+        checkMode("Tab held with VSync unchecked", true, 0);
+        tab(SDL_EVENT_KEY_UP);
+        checkMode("Tab released with VSync unchecked", false, 0);
+
+        activateMenu(window, "VSync", "Display");
+        window.render();
+        tab(SDL_EVENT_KEY_DOWN);
+        checkMode("Tab held after checking VSync again", true, 0);
+        focus(SDL_EVENT_WINDOW_FOCUS_LOST);
+        checkMode("focus lost while holding Tab", false, 1);
+        focus(SDL_EVENT_WINDOW_FOCUS_GAINED);
+        checkMode("focus restored", false, 1);
+    }
 }
 
 int main()
@@ -290,6 +441,7 @@ int main()
         testVideoOutput();
         testInputMenu();
         testKeyboardToWindow();
+        testSpeedControls();
     }
     catch (const std::exception &error)
     {
