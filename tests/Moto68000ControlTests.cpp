@@ -287,12 +287,20 @@ int main()
     setup(stackFrame);
     stackFrame.words[0x100] = 0x4e57; // LINK A7,#-4.
     stackFrame.words[0x102] = 0xfffc;
+    stackFrame.words[0x104] = 0x4e5f; // UNLK A7.
+    stackFrame.words[0xff8] = 0x1234;
+    stackFrame.words[0xffa] = 0x5679;
     Moto68000 stackFrameCpu(stackFrame);
     stackFrameCpu.reset();
     run(stackFrameCpu, 40 + 16);
     check(stackFrameCpu.state().address[7] == 0xff8 &&
               stackFrame.words.at(0xffc) == 0 && stackFrame.words.at(0xffe) == 0x1000,
           "LINK A7 usa o valor antigo da pilha antes de aplicar o deslocamento");
+    stackFrame.reads.clear();
+    run(stackFrameCpu, 12);
+    check(stackFrameCpu.state().address[7] == 0x12345679 && stackFrameCpu.state().pc == 0x106 &&
+              stackFrame.reads == std::vector<std::uint32_t>({0xff8, 0xffa, 0x108}),
+          "UNLK A7 termina com o valor desempilhado em A7");
 
     struct PeaCase
     {

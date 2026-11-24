@@ -119,6 +119,26 @@ namespace
 
 int main()
 {
+    Bus indirectLea;
+    setup(indirectLea);
+    indirectLea.putWord(0x100, 0x41d7); // LEA (A7),A0.
+    indirectLea.putWord(0x102, 0x43d0); // LEA (A0),A1.
+    Moto68000 indirectLeaCpu(indirectLea);
+    Moto68000::State indirectState;
+    indirectState.pc = 0x100;
+    indirectState.sr = 0x001f;
+    indirectState.prefetch = {0x41d7, 0x43d0};
+    indirectLeaCpu.restoreInstructionBoundary(indirectState, 0x12345679, 0x1800);
+    run(indirectLeaCpu, 4);
+    check(indirectLeaCpu.state().address[0] == 0x12345679 &&
+              indirectLeaCpu.state().address[7] == 0x12345679 && indirectLeaCpu.state().pc == 0x102 &&
+              indirectLeaCpu.state().sr == 0x001f && indirectLea.reads == std::vector<std::uint32_t>{0x104},
+          "LEA (A7),A0 copia o endereço ímpar completo e faz só uma pré-busca");
+    run(indirectLeaCpu, 4);
+    check(indirectLeaCpu.state().address[1] == 0x12345679 &&
+              indirectLea.reads == std::vector<std::uint32_t>({0x104, 0x106}),
+          "LEA (A0),A1 usa quatro ciclos e preserva a fila");
+
     for (const std::uint16_t displacement : {std::uint16_t(0x0010), std::uint16_t(0xfff0)})
     {
         Bus relative;
@@ -174,10 +194,16 @@ int main()
     indexedLea.putWord(0x108, 0x1004);
     Moto68000 indexedLeaCpu(indexedLea);
     indexedLeaCpu.reset();
-    run(indexedLeaCpu, 40 + 4 + 12);
+    run(indexedLeaCpu, 40 + 4);
+    indexedLea.trace.clear();
+    run(indexedLeaCpu, 12);
     check(indexedLeaCpu.state().address[0] == 7 && indexedLeaCpu.state().pc == 0x106 &&
               indexedLeaCpu.state().sr == 0x2700,
           "LEA indexado por An calcula o endereço em doze ciclos sem alterar flags");
+    check(indexedLea.trace.size() == 12 && !indexedLea.trace[1].active &&
+              indexedLea.trace[2].active && indexedLea.trace[5].active &&
+              !indexedLea.trace[6].active && !indexedLea.trace[7].active && indexedLea.trace[8].active,
+          "LEA indexado intercala dois ciclos internos com cada pré-busca");
     run(indexedLeaCpu, 12);
     check(indexedLeaCpu.state().address[1] == 0x10f && indexedLeaCpu.state().pc == 0x10a,
           "LEA indexado pelo PC usa a palavra de extensão como base");
@@ -323,7 +349,7 @@ int main()
     odd.putWord(0x104, 0x3220); // MOVE.W -(A0),D1: endereço $10FF.
     Moto68000 oddCpu(odd);
     oddCpu.reset();
-    run(oddCpu, 40 + 8 + 2 + 50);
+    run(oddCpu, 40 + 8 + 2 + 58);
     check(oddCpu.state().pc == 0x200 && oddCpu.state().address[0] == 0x10ff &&
               !oddCpu.halted(),
           "pré-decremento precede erro de endereço");

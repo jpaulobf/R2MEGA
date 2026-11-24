@@ -3,7 +3,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 using namespace R2MEGA::Core;
@@ -33,6 +35,135 @@ namespace
         check(board.masterCycles() == board.m68k().state().cycles * 7,
               "O scheduler perdeu a proporção de sete clocks mestres por ciclo do 68000");
     }
+
+    void testCartridgeReset(const std::filesystem::path &directory)
+    {
+        const auto path = directory / "m68k-vres.md";
+        std::vector<std::uint8_t> rom(0x200);
+        putWord(rom, 0x000, 0x00ff);
+        putWord(rom, 0x002, 0xff00); // SSP = $00FFFF00.
+        putWord(rom, 0x006, 0x0100);
+        putWord(rom, 8 * 4 + 2, 0x0130); // Violação de privilégio.
+        putWord(rom, 0x100, 0x7007);     // MOVEQ #7,D0
+        putWord(rom, 0x102, 0x4e70);     // RESET
+        putWord(rom, 0x104, 0x7209);     // MOVEQ #9,D1
+        putWord(rom, 0x106, 0x4e73);     // RTE muda para modo usuário.
+        putWord(rom, 0x120, 0x4e70);     // RESET em modo usuário gera vetor 8.
+        putWord(rom, 0x130, 0x740b);     // MOVEQ #11,D2 no tratador.
+        putWord(rom, 0x132, 0x60fe);
+        {
+            std::ofstream file(path, std::ios::binary);
+            file.write(reinterpret_cast<const char *>(rom.data()),
+                       static_cast<std::streamsize>(rom.size()));
+            check(bool(file), "Falha ao gravar a ROM de diagnóstico de /VRES");
+        }
+
+        auto storage = std::make_unique<Board>();
+        auto &board = *storage;
+        using Edge = std::pair<std::uint64_t, bool>;
+        std::vector<Edge> edges;
+        board.setCartridgeVresHandler([&](bool asserted)
+                                      {
+            check(board.cartridgeVresAsserted() == asserted, "Nível de /VRES durante a notificação");
+            edges.emplace_back(board.masterCycles(), asserted); });
+        board.insertCartridge(Cartridge::load(path));
+        check(!board.cartridgeVresAsserted() && edges.empty(), "/VRES deve começar inativo");
+        board.writeWord(0xffff00, 0x0000); // SR de usuário no quadro para RTE.
+        board.writeWord(0xffff04, 0x0120);
+        board.writeWord(0xffff20, 0xabcd);
+        board.writeByte(0xa00000, 0x18); // JR -2 no Z80.
+        board.writeByte(0xa00001, 0xfe);
+        board.writeByte(0xa04000, 0x22);
+        board.writeByte(0xa04001, 0x5a);
+        board.writeByte(0xc00011, 0x92);
+        board.writeByte(0xa10009, 0x40);   // Direção do pino TH da porta 1.
+        board.writeWord(0xc00004, 0x8140); // Liga a exibição da VDP.
+        board.writeByte(0xa11200, 1);      // Libera ZRES.
+        runUntil(board, 1);
+        const auto resetStart = board.masterCycles();
+        constexpr auto divider = Scheduler::M68KDivider;
+        for (unsigned cycle = 1; cycle <= 132 * divider; ++cycle)
+        {
+            board.clock();
+            check(board.cartridgeVresAsserted() == (cycle >= 5 * divider && cycle < 129 * divider),
+                  "/VRES deve manter o nível entre clocks do 68000");
+        }
+        check(edges == std::vector<Edge>{{resetStart + 5 * divider, true}, {resetStart + 129 * divider, false}},
+              "O conector deve receber só as duas bordas do pulso de 124 ciclos");
+        check(board.m68k().state().pc == 0x104 && board.m68k().state().data[0] == 7,
+              "RESET deve preservar D0 e continuar na instrução seguinte");
+        check(board.vdp().cycleInLine() == board.masterCycles() && board.vdp().registerValue(1) == 0x40 &&
+                  board.z80().state().cycles == board.masterCycles() / Scheduler::Z80Divider &&
+                  board.ym2612().registerValue(0, 0x22) == 0x5a && board.psg().registerValue(1) == 2 &&
+                  board.readByte(0xa10009) == 0x40 && board.readWord(0xffff20) == 0xabcd &&
+                  board.readMemory(1) == 0xfe,
+              "A atividade do vídeo e do Z80 e o estado dos periféricos devem sobreviver a /VRES");
+
+        runUntil(board, 5);
+        check(board.m68k().state().data[1] == 9 && board.m68k().state().data[2] == 11 &&
+                  board.readWord(0xffff04) == 0x0120,
+              "A ROM deve continuar após RESET e entrar no vetor 8 em modo usuário");
+        check(edges.size() == 2 && !board.cartridgeVresAsserted(),
+              "RESET em modo usuário deve deixar /VRES inativo");
+
+        board.insertCartridge(Cartridge::load(path));
+        runUntil(board, 1);
+        for (unsigned cycle = 0; cycle < 5 * divider; ++cycle)
+            board.clock();
+        check(board.cartridgeVresAsserted() && edges.size() == 3 && edges.back().second,
+              "A nova execução deve emitir outro pulso");
+        board.insertCartridge(Cartridge::load(path));
+        check(!board.cartridgeVresAsserted() && edges.size() == 4 && !edges.back().second,
+              "A troca de cartucho durante o pulso deve liberar /VRES");
+    }
+
+    void testZ80VerticalInterrupt(const std::filesystem::path &path)
+    {
+        auto storage = std::make_unique<Board>();
+        auto &board = *storage;
+        board.insertCartridge(Cartridge::load(path));
+        // LD SP,$1FFF; IM 1; EI; HALT.
+        const std::uint8_t program[] = {0x31, 0xff, 0x1f, 0xed, 0x56, 0xfb, 0x76};
+        for (unsigned i = 0; i < sizeof program; ++i)
+            board.writeMemory(i, program[i]);
+        board.writeMemory(0x38, 0x3e); // LD A,$37 no tratador de IM 1.
+        board.writeMemory(0x39, 0x37);
+        board.writeMemory(0x3a, 0x76);
+        board.writeByte(0xa11200, 1);
+
+        constexpr auto vblankStart = VDP::visibleLines * VDP::masterCyclesPerLine;
+        while (board.masterCycles() < vblankStart + VDP::verticalInterruptCycle)
+            board.clock();
+        check(board.z80().state().halted && !board.z80().state().irq && board.z80().state().a == 0,
+              "O Z80 deve continuar em HALT antes do disparo do V-INT");
+
+        while (board.masterCycles() < vblankStart + VDP::verticalInterruptCycle + 600)
+            board.clock();
+        check(board.z80().state().irq && board.z80().state().halted && board.z80().state().a == 0x37 &&
+                  board.vdp().interruptLevel() == 0,
+              "O V-INT deve acordar o Z80 mesmo com a interrupção do 68000 desabilitada");
+        check(board.z80().state().sp == 0x1ffd && board.readMemory(0x1ffd) == 7,
+              "O Z80 empilha o PC posterior ao HALT");
+
+        while (board.masterCycles() < vblankStart + VDP::masterCyclesPerLine + Scheduler::Z80Divider)
+            board.clock();
+        check(!board.z80().state().irq, "O pulso de INT termina ao sair da primeira linha de VBlank");
+    }
+
+    void testZ80UnmappedPorts(const std::filesystem::path &path)
+    {
+        auto board = std::make_unique<Board>();
+        board->insertCartridge(Cartridge::load(path));
+        // LD A,$42; OUT ($80),A; IN A,($80); HALT.
+        const std::uint8_t program[] = {0x3e, 0x42, 0xd3, 0x80, 0xdb, 0x80, 0x76};
+        for (unsigned i = 0; i < sizeof program; ++i)
+            board->writeMemory(i, program[i]);
+        board->writeByte(0xa11200, 1);
+        for (unsigned cycle = 0; cycle < 600; ++cycle)
+            board->clock();
+        check(board->z80().state().halted && board->z80().state().a == 0xff,
+              "As portas desmapeadas do Genesis ignoram OUT e devolvem $FF em IN");
+    }
 }
 
 int main(int argc, char **argv)
@@ -42,6 +173,7 @@ int main(int argc, char **argv)
         check(argc == 2, "Diretório de saída da ROM ausente");
         const auto directory = std::filesystem::path(argv[1]);
         std::filesystem::create_directories(directory);
+        testCartridgeReset(directory);
         const auto path = directory / "m68k-diagnostic.md";
         std::vector<std::uint8_t> rom(0x200, 0);
         putWord(rom, 0x000, 0x00ff); // SSP = $00FFFF00, dentro da Work RAM.
@@ -75,6 +207,8 @@ int main(int argc, char **argv)
                        static_cast<std::streamsize>(rom.size()));
             check(bool(file), "Falha ao gravar a ROM de diagnóstico");
         }
+        testZ80VerticalInterrupt(path);
+        testZ80UnmappedPorts(path);
 
         Board board;
         board.insertCartridge(Cartridge::load(path));

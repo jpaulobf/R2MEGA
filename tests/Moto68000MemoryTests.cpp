@@ -32,7 +32,8 @@ struct Bus : M68KBus
     void writeByte(std::uint32_t, std::uint8_t) override { throw std::logic_error("byte write"); }
     void writeWord(std::uint32_t address, std::uint16_t value) override
     {
-        if (address != 0xffff00) throw std::logic_error("address");
+        if (address != 0xffff00)
+            throw std::logic_error("address");
         writes.push_back(address);
         ram = value;
     }
@@ -51,12 +52,14 @@ struct Bus : M68KBus
 
 static void require(bool value)
 {
-    if (!value) throw std::runtime_error("Falha no teste de memória do 68000");
+    if (!value)
+        throw std::runtime_error("Falha no teste de memória do 68000");
 }
 
 static void tick(Moto68000 &cpu, unsigned count)
 {
-    while (count--) cpu.clock();
+    while (count--)
+        cpu.clock();
 }
 
 int main()
@@ -78,10 +81,10 @@ int main()
     tick(cpu, 4);
     require(cpu.state().pc == 14 && cpu.state().data[0] == 0x34);
     bus.writeWait = 2;
-    tick(cpu, 7);
+    tick(cpu, 4);
     require(cpu.state().pc == 14 && bus.writes.empty());
     require(cpu.pins().write && cpu.pins().waiting && cpu.pins().functionCode == 5);
-    tick(cpu, 3);
+    tick(cpu, 6);
     require(cpu.state().pc == 16 && bus.ram == 0x34 && bus.writes.size() == 1);
     require(cpu.state().cycles == 62 && bus.reads.back() == 18);
     bus.readWait = 2;

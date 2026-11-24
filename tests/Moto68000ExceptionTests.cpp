@@ -78,14 +78,26 @@ namespace
         bus.words[0x204] = bus.words[0x304] = 0x4e71;
     }
 
-    void checkFrame(const Bus &bus, std::uint16_t opcode,
-                    std::uint16_t address, std::uint16_t status)
+    void checkBusErrorFrame(const Bus &bus, std::uint16_t opcode,
+                            std::uint16_t address, std::uint16_t status)
     {
         check(bus.words.at(0xff2) == 0x2700, "SR salvo");
         check(bus.words.at(0xff4) == 0 && bus.words.at(0xff6) == 0x104, "PC salvo");
         check(bus.words.at(0xff8) == opcode, "IR salvo");
         check(bus.words.at(0xffa) == 0 && bus.words.at(0xffc) == address, "endereço salvo");
         check(bus.words.at(0xffe) == status, "estado da transferência salvo");
+        check(bus.writes.size() == 7, "sete palavras de exceção");
+    }
+
+    void checkAddressErrorFrame(const Bus &bus, std::uint16_t opcode,
+                                std::uint16_t address, std::uint16_t status,
+                                std::uint16_t pc, std::uint16_t sr = 0x2700)
+    {
+        check(bus.words.at(0xffa) == sr, "SR salvo no erro de endereço");
+        check(bus.words.at(0xffc) == 0 && bus.words.at(0xffe) == pc, "PC salvo no erro de endereço");
+        check(bus.words.at(0xff8) == opcode, "IR salvo no erro de endereço");
+        check(bus.words.at(0xff4) == 0 && bus.words.at(0xff6) == address, "endereço salvo no erro de endereço");
+        check(bus.words.at(0xff2) == status, "estado da transferência salvo no erro de endereço");
         check(bus.writes.size() == 7, "sete palavras de exceção");
     }
 }
@@ -98,10 +110,20 @@ int main()
     oddCpu.reset();
     run(oddCpu, 48);
     check(oddCpu.state().pc == 0x104, "LEA concluído");
-    run(oddCpu, 50);
+    const auto oddStart = odd.trace.size();
+    run(oddCpu, 58);
     check(!oddCpu.halted() && oddCpu.state().pc == 0x200, "vetor de erro de endereço");
     check(oddCpu.state().address[7] == 0xff2, "pilha da exceção");
-    checkFrame(odd, 0x3010, 0x0101, 0x15);
+    checkAddressErrorFrame(odd, 0x3010, 0x0101, 0x3015, 0x106);
+    check(odd.writes == std::vector<std::uint32_t>({0xffe, 0xffa, 0xffc, 0xff8, 0xff6, 0xff2, 0xff4}),
+          "MOVE desalinhado escreve o quadro de endereço na ordem do 68000");
+    for (unsigned phase = 0; phase < 4; ++phase)
+    {
+        const auto &pins = odd.trace.at(oddStart + phase);
+        check(pins.addressError && !pins.addressStrobe && pins.address == 0x0100 &&
+                  !pins.write && pins.phase == phase && pins.functionCode == 5,
+              "leitura desalinhada apresenta o endereço durante quatro ciclos sem AS");
+    }
     check(oddCpu.lastException().serial == 1 && oddCpu.lastException().vector == 3 &&
               oddCpu.lastException().pc == 0x104 && oddCpu.lastException().opcode == 0x3010 &&
               oddCpu.lastException().addressValid && oddCpu.lastException().address == 0x0101,
@@ -116,11 +138,29 @@ int main()
     setup(oddWrite, 0x0101, 0x3080); // MOVE.W D0,(A0) em endereço ímpar
     Moto68000 oddWriteCpu(oddWrite);
     oddWriteCpu.reset();
-    run(oddWriteCpu, 48 + 4 + 50);
+    run(oddWriteCpu, 48 + 58);
     check(oddWriteCpu.state().pc == 0x200, "vetor de escrita desalinhada");
-    checkFrame(oddWrite, 0x3080, 0x0101, 0x05);
+    checkAddressErrorFrame(oddWrite, 0x3080, 0x0101, 0x3085, 0x108, 0x2704);
     for (const auto &pins : oddWrite.trace)
         check(!(pins.active && pins.address == 0x0101), "escrita ímpar não chegou ao barramento");
+
+    Bus oddLongWrite;
+    setup(oddLongWrite, 0x0400, 0x2290); // MOVE.L (A0),(A1).
+    oddLongWrite.words[0x400] = 0x8001;
+    oddLongWrite.words[0x402] = 0x0001;
+    Moto68000::State longMove;
+    longMove.pc = 0x104;
+    longMove.sr = 0x271f;
+    longMove.prefetch = {0x2290, 0x4e71};
+    longMove.address[0] = 0x400;
+    longMove.address[1] = 0x501;
+    Moto68000 longWriteCpu(oddLongWrite);
+    longWriteCpu.restoreInstructionBoundary(longMove, 0, 0x1000);
+    run(longWriteCpu, 66);
+    check(longWriteCpu.state().pc == 0x200 &&
+              oddLongWrite.reads == std::vector<std::uint32_t>({0x400, 0x402, 12, 14, 0x200, 0x202}),
+          "MOVE.L lê a origem antes da tentativa de escrita, sem pré-busca antecipada");
+    checkAddressErrorFrame(oddLongWrite, 0x2290, 0x0501, 0x2285, 0x108, 0x2710);
 
     Bus oddInstruction;
     setup(oddInstruction, 0x0400, 0x3010);
@@ -144,7 +184,7 @@ int main()
     readCpu.reset();
     run(readCpu, 48 + 2 + 3 + 49);
     check(!readCpu.halted() && readCpu.state().pc == 0x300, "vetor de erro de leitura");
-    checkFrame(readFault, 0x3010, 0x0400, 0x15);
+    checkBusErrorFrame(readFault, 0x3010, 0x0400, 0x15);
     check(readCpu.lastException().serial == 1 && readCpu.lastException().vector == 2 &&
               readCpu.lastException().addressValid && readCpu.lastException().address == 0x0400,
           "diagnóstico preserva a origem do erro de barramento");
@@ -169,9 +209,9 @@ int main()
     writeFault.failingWrite = true;
     Moto68000 writeCpu(writeFault);
     writeCpu.reset();
-    run(writeCpu, 48 + 4 + 3 + 49);
+    run(writeCpu, 48 + 3 + 49);
     check(!writeCpu.halted() && writeCpu.state().pc == 0x300, "vetor de erro de escrita");
-    checkFrame(writeFault, 0x3080, 0x0400, 0x05);
+    checkBusErrorFrame(writeFault, 0x3080, 0x0400, 0x05);
 
     Bus doubleFault;
     setup(doubleFault, 0x0101, 0x3010);
@@ -213,13 +253,27 @@ int main()
     userFault.words[0x128] = 0x4e71;
     Moto68000 userFaultCpu(userFault);
     userFaultCpu.reset();
-    run(userFaultCpu, 40 + 20 + 8 + 50);
+    run(userFaultCpu, 40 + 20 + 8 + 58);
     check(userFaultCpu.state().pc == 0x200 && userFaultCpu.state().sr == 0x2000 &&
               userFaultCpu.state().address[7] == 0xff8,
           "erro de usuário troca para o SSP");
-    check(userFault.words.at(0xff8) == 0 && userFault.words.at(0xffc) == 0x124 &&
-              userFault.words.at(0xffe) == 0x3010 && userFault.words.at(0x1004) == 0x11,
+    check(userFault.words.at(0x1000) == 0 && userFault.words.at(0x1004) == 0x126 &&
+              userFault.words.at(0xffe) == 0x3010 && userFault.words.at(0xff8) == 0x3011,
           "quadro de erro conserva modo usuário e código de função 1");
+
+    Bus unlink;
+    setup(unlink, 0x0401, 0x4e5e);
+    Moto68000::State unlinkState;
+    unlinkState.pc = 0x104;
+    unlinkState.prefetch = {0x4e5e, 0x4e71};
+    unlinkState.address[6] = 0x0401;
+    Moto68000 unlinkCpu(unlink);
+    unlinkCpu.restoreInstructionBoundary(unlinkState, 0, 0x1000);
+    run(unlinkCpu, 58);
+    check(!unlinkCpu.halted() && unlinkCpu.state().pc == 0x200 &&
+              unlinkCpu.supervisorStackPointer() == 0xff2 && unlinkCpu.state().address[6] == 0x0401,
+          "UNLK desalinhado empilha no SSP original e preserva An");
+    checkAddressErrorFrame(unlink, 0x4e5e, 0x0401, 0x4e55, 0x108);
 
     Bus exceptionFault;
     setup(exceptionFault, 0x0400, 0x3010);
