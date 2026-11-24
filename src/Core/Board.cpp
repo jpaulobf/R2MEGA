@@ -39,6 +39,27 @@ namespace R2MEGA::Core
         z80Bank_ = 0;
         externalInterruptLevel_ = 0;
         cpu_.setInterruptLevel(0);
+        driveCartridgeVres(false);
+    }
+
+    void Board::setCartridgeVresHandler(std::function<void(bool)> handler)
+    {
+        cartridgeVresHandler_ = std::move(handler);
+    }
+
+    void Board::observe(const M68KPins &pins)
+    {
+        // O RESET emitido pelo 68000 chega ao conector pela rede /VRES.
+        driveCartridgeVres(pins.resetAsserted);
+    }
+
+    void Board::driveCartridgeVres(bool asserted)
+    {
+        if (cartridgeVresAsserted_ == asserted)
+            return;
+        cartridgeVresAsserted_ = asserted;
+        if (cartridgeVresHandler_)
+            cartridgeVresHandler_(asserted);
     }
 
     void Board::clock() { scheduler_.clock(); }
@@ -71,7 +92,10 @@ namespace R2MEGA::Core
     {
         sn76489_.clock();
         if (!z80ResetAsserted_)
+        {
+            z80_.setIRQ(vdp_.z80InterruptAsserted());
             z80_.tick();
+        }
     }
     bool Board::z80BusGranted() const
     {
@@ -321,6 +345,7 @@ namespace R2MEGA::Core
         }
         notImplemented();
     }
-    std::uint8_t Board::input(std::uint16_t) { notImplemented(); }
-    void Board::output(std::uint16_t, std::uint8_t) { notImplemented(); }
+    // No modo Genesis, o Z80 acessa os periféricos pelo espaço de memória.
+    std::uint8_t Board::input(std::uint16_t) { return 0xff; }
+    void Board::output(std::uint16_t, std::uint8_t) {}
 }

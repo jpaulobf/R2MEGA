@@ -12,6 +12,7 @@
 #include "Core/Memory/AudioRAM.h"
 #include "Core/VDP/VDP.h"
 #include "Core/Scheduler/Scheduler.h"
+#include <functional>
 
 namespace R2MEGA::Core
 {
@@ -26,6 +27,10 @@ namespace R2MEGA::Core
 
         // Instala o cartucho e inicia a leitura dos vetores de reset do 68000.
         void insertCartridge(Cartridge cartridge);
+        // /VRES do conector do cartucho (B27). Verdadeiro representa o nível baixo.
+        bool cartridgeVresAsserted() const { return cartridgeVresAsserted_; }
+        // Notifica cada mudança de nível de forma síncrona no clock ou na troca do cartucho.
+        void setCartridgeVresHandler(std::function<void(bool)> handler);
         const Moto68000 &m68k() const { return cpu_; }
         const VDP &vdp() const { return vdp_; }
         const Z80 &z80() const { return z80_; }
@@ -57,6 +62,8 @@ namespace R2MEGA::Core
         void output(std::uint16_t port, std::uint8_t value) override;
 
     private:
+        void observe(const M68KPins &pins) override;
+        void driveCartridgeVres(bool asserted);
         void clockVDP() override;
         void clockM68K() override;
         void clockZ80() override;
@@ -75,6 +82,8 @@ namespace R2MEGA::Core
         SN76489 sn76489_;
         ControllerPorts controllers_;
         Scheduler scheduler_;
+        std::function<void(bool)> cartridgeVresHandler_;
+        bool cartridgeVresAsserted_ = false;
         bool z80BusRequested_ = false;
         bool z80ResetAsserted_ = true;
         std::uint16_t z80Bank_ = 0;
