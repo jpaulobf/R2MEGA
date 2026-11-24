@@ -58,6 +58,16 @@ conectado atende o primeiro jogador que estiver configurado como Joystick.
 grava o mapeamento em `resources/keyboard.ini`, relativo ao diretório de
 trabalho; `Default` restaura o padrão no diálogo.
 
+## Apresentação
+
+`Display > VSync` começa ativado e sincroniza a apresentação com o monitor.
+A emulação segue o relógio do console em ambos os modos, a cerca de 59,92 FPS
+no perfil NTSC atual. Num monitor mais rápido, a janela pode reapresentar o
+último quadro. O título mostra os FPS emulados.
+
+`Hacks > Enable Fast-Forward` permite acelerar enquanto Tab estiver pressionado
+e suspende temporariamente o VSync durante o avanço rápido.
+
 ## Licença
 
 GNU GPL v3.0. Consulte [LICENSE](LICENSE).
