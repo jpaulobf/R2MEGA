@@ -1,5 +1,6 @@
 #include "Systems/Engine.h"
 #include "Systems/FrameCounter.h"
+#include "Systems/FramePacer.h"
 #include "Systems/Input.h"
 #include "Window/Window.h"
 #include "Core/Cartridge/Cartridge.h"
@@ -19,6 +20,7 @@ namespace R2MEGA::Systems
             Input input;
             bool running = false;
             bool paused = false;
+            bool resetTiming = true;
             using Clock = FrameCounter::Clock;
             FrameCounter frameCounter;
             Clock::time_point pauseStarted;
@@ -67,6 +69,7 @@ namespace R2MEGA::Systems
                     return;
                 const auto now = Clock::now();
                 paused = !paused;
+                resetTiming = true;
                 if (paused)
                     pauseStarted = now;
                 else
@@ -76,7 +79,7 @@ namespace R2MEGA::Systems
             { return paused; };
             emulationCallbacks.fps = [&frameCounter]()
             { return frameCounter.fps(); };
-            Window::Window window([&cartridge, &board, &running, &paused, &lastError, &lastBusAccess, &firstCpuException, &frameCounter](const std::filesystem::path &path)
+            Window::Window window([&cartridge, &board, &running, &paused, &resetTiming, &lastError, &lastBusAccess, &firstCpuException, &frameCounter](const std::filesystem::path &path)
                                   {
                 auto loaded = Core::Cartridge::load(path);
                 auto name = loaded.romName();
@@ -87,6 +90,7 @@ namespace R2MEGA::Systems
                 firstCpuException = {};
                 running = true;
                 paused = false;
+                resetTiming = true;
                 frameCounter.reset(Clock::now());
                 return name; }, [&cartridge, &board]() -> const std::uint32_t *
                                   { return cartridge ? board.vdp().pixels().data() : nullptr; },
@@ -109,19 +113,11 @@ namespace R2MEGA::Systems
             window.open();
             if (!input.initialize())
                 std::cerr << "R2MEGA: gamepads indisponíveis: " << SDL_GetError() << '\n';
-            enum class LoopMode
-            {
-                Native,
-                VSync,
-                FastForward
-            };
-            constexpr Uint64 masterClock = 53693175;
+            constexpr unsigned masterClock = 53693175;
             constexpr unsigned cyclesPerFrame = Core::VDP::masterCyclesPerLine * Core::VDP::linesPerFrame;
-            constexpr Uint64 framePeriodNs = cyclesPerFrame * SDL_NS_PER_SECOND / masterClock;
             constexpr unsigned fastFramesPerPresent = 4;
-            auto mode = LoopMode::Native;
-            auto deadline = SDL_GetTicksNS();
-            bool wasEmulating = false;
+            FramePacer pacer(masterClock, cyclesPerFrame);
+            bool wasFastForward = false;
             unsigned fastFrames = 0;
             while (window.processEvents())
             {
@@ -131,21 +127,18 @@ namespace R2MEGA::Systems
                 const bool emulating = running && !paused;
                 const bool fastForward = emulating && window.fastForwardEnabled() && input.fastForwardPressed();
                 const bool vsync = window.synchronizeVSync(fastForward);
-                const auto nextMode = fastForward ? LoopMode::FastForward
-                                      : vsync     ? LoopMode::VSync
-                                                  : LoopMode::Native;
-                if (nextMode == LoopMode::Native)
+                const auto now = SDL_GetTicksNS();
+                if (resetTiming || fastForward != wasFastForward)
                 {
-                    const auto now = SDL_GetTicksNS();
-                    // Trocas de modo e pausas longas iniciam um novo prazo.
-                    if (mode != nextMode || emulating != wasEmulating ||
-                        (emulating && board.masterCycles() == 0) || now > deadline + 4 * framePeriodNs)
-                        deadline = now;
-                    deadline += framePeriodNs;
+                    pacer.reset(now);
+                    resetTiming = false;
                 }
-                mode = nextMode;
-                wasEmulating = emulating;
-                if (emulating)
+                wasFastForward = fastForward;
+                const unsigned framesPerIteration = fastForward ? 1 : FramePacer::maxFramesPerPresent;
+                // O clock da placa determina quais quadros estão prontos para emular.
+                for (unsigned frame = 0; emulating && running && frame < framesPerIteration &&
+                                         (fastForward || pacer.takeFrame(now));
+                     ++frame)
                 {
                     const auto previousFrame = board.vdp().frame();
                     for (unsigned cycle = 0; cycle < cyclesPerFrame; ++cycle)
@@ -169,15 +162,17 @@ namespace R2MEGA::Systems
                         frameCounter.record(Clock::now());
                 }
                 // Entre quadros acelerados, volta ao processamento de eventos para ler a soltura de Tab.
-                if (running && mode == LoopMode::FastForward && ++fastFrames < fastFramesPerPresent)
+                if (running && fastForward && ++fastFrames < fastFramesPerPresent)
                     continue;
                 fastFrames = 0;
                 window.render();
-                if (mode == LoopMode::Native)
+                if (!vsync && !fastForward)
                 {
-                    const auto now = SDL_GetTicksNS();
-                    if (now < deadline)
-                        SDL_DelayPrecise(deadline - now);
+                    const auto afterRender = SDL_GetTicksNS();
+                    if (!emulating)
+                        pacer.takeFrame(afterRender);
+                    if (afterRender < pacer.deadline())
+                        SDL_DelayPrecise(pacer.deadline() - afterRender);
                 }
             }
             input.shutdown();
