@@ -113,20 +113,6 @@ namespace R2MEGA::Core
             }
         }
 
-        bool extendedMoveOpcode(std::uint16_t opcode)
-        {
-            if ((opcode >> 12) < 1 || (opcode >> 12) > 3)
-                return false;
-            const unsigned sourceMode = (opcode >> 3) & 7, sourceReg = opcode & 7;
-            const unsigned targetMode = (opcode >> 6) & 7, targetReg = (opcode >> 9) & 7;
-            const bool extendedSource = sourceMode == 5 ||
-                                        (sourceMode == 7 && (sourceReg <= 1 || sourceReg == 4));
-            const bool extendedTarget = targetMode == 5 ||
-                                        (targetMode == 7 && targetReg <= 1);
-            return (targetMode == 0 && extendedSource) ||
-                   (sourceMode == 0 && extendedTarget);
-        }
-
         bool combinedMoveOpcode(std::uint16_t opcode)
         {
             if ((opcode >> 12) < 1 || (opcode >> 12) > 3)
@@ -154,6 +140,14 @@ namespace R2MEGA::Core
             if (mode != 7)
                 return 0;
             return reg == 1 || (reg == 4 && size == 4) ? 2 : 1;
+        }
+
+        std::uint16_t moveStatus(std::uint16_t sr, std::uint32_t value, unsigned size)
+        {
+            const auto sign = 1u << (size * 8 - 1);
+            const auto mask = (sign - 1) | sign;
+            return (sr & ~std::uint16_t(0x0f)) |
+                   (value & sign ? 0x08 : 0) | ((value & mask) == 0 ? 0x04 : 0);
         }
 
         std::uint32_t moveMemoryAddress(unsigned mode, unsigned reg,
@@ -332,16 +326,18 @@ namespace R2MEGA::Core
     void Moto68000::beginFault(unsigned vector, std::uint32_t address, bool write,
                                unsigned functionCode)
     {
+        const bool moveFault = vector == 3 && memoryOp_ == MemoryOp::CombinedMove;
+        const bool unlinkFault = vector == 3 && memoryOp_ == MemoryOp::Frame && frame_.unlink;
         const bool accurateAddress = vector == 3 &&
-                                     (memoryOp_ == MemoryOp::MultiplyDivide ||
+                                     (moveFault || unlinkFault || memoryOp_ == MemoryOp::MultiplyDivide ||
                                       memoryOp_ == MemoryOp::Arithmetic ||
                                       memoryOp_ == MemoryOp::TestClearCompare ||
                                       memoryOp_ == MemoryOp::Movem ||
                                       (memoryOp_ == MemoryOp::ExtendedArithmetic &&
                                        extendedArithmetic_.compareMemory));
         const bool processingException = exceptionActive_ && !exceptionInstructionContext_;
-        const std::uint16_t faultIr = returnActive_ ? returnIr_ : controlOp_ != ControlOp::None ? controlIr_
-                                                                                                : state_.prefetch[0];
+        std::uint16_t faultIr = returnActive_ ? returnIr_ : controlOp_ != ControlOp::None ? controlIr_
+                                                                                          : state_.prefetch[0];
         const unsigned writes = exceptionLongFrame_ ? 7 : 3;
         const unsigned mode = memoryOp_ == MemoryOp::MultiplyDivide     ? multiplyDivide_.mode
                               : memoryOp_ == MemoryOp::Arithmetic       ? arithmetic_.mode
@@ -369,6 +365,44 @@ namespace R2MEGA::Core
                 savedPc += 4;
             else if (memoryOp_ == MemoryOp::Movem)
                 savedPc += 6 + movem_.extensions * 2;
+            else if (unlinkFault)
+                savedPc += 4;
+            else if (moveFault)
+            {
+                const auto &move = combinedMove_;
+                if (write)
+                {
+                    const unsigned extensions = move.sourceExtensions                                     ? move.sourceExtensions
+                                                : move.targetExtensions == 2 && !move.specialAbsoluteLong ? 1
+                                                                                                          : 0;
+                    savedPc += 4 + 2 * extensions;
+                    if (move.size == 2 && move.targetMode == 4)
+                        faultIr = move.nextOpcode;
+                    const bool memorySource = move.sourceMode >= 2 && !move.immediate;
+                    if (move.size == 2)
+                        state_.sr = moveStatus(state_.sr, move.value, move.size);
+                    else if (move.targetMode <= 3 || (move.specialAbsoluteLong && move.sourceMode == 3))
+                    {
+                        // Na transferência direta memória-memória, a última leitura foi a palavra baixa.
+                        if (memorySource)
+                            state_.sr = moveStatus(state_.sr, move.value, 2);
+                    }
+                    else
+                    {
+                        const bool preserveVC = !memorySource && (move.targetMode == 5 || move.targetMode == 6);
+                        const auto vc = preserveVC ? state_.sr & 3 : 0;
+                        state_.sr = moveStatus(state_.sr, move.value, 4) | vc;
+                    }
+                }
+                else
+                {
+                    savedPc += 2;
+                    if (move.sourceMode == 7 && move.sourceReg <= 1)
+                        savedPc += 2 * move.sourceExtensions;
+                    else if (move.sourceMode == 4 && move.size == 2)
+                        savedPc += 2;
+                }
+            }
             else
             {
                 const unsigned addressWords = mode == 4               ? (longPredecrement ? 2 : 4)
@@ -735,78 +769,11 @@ namespace R2MEGA::Core
         traceInstruction_ = false;
     }
 
-    void Moto68000::clockExtendedMove()
-    {
-        auto &move = extendedMove_;
-        const unsigned second = move.extensions == 2 ? 1 : 0;
-        const unsigned reads = move.store || move.immediate ? 0 : (move.size == 4 ? 2 : 1);
-        const unsigned writes = move.store ? (move.size == 4 ? 2 : 1) : 0;
-        const unsigned dataStart = second + 1;
-        const unsigned followingStage = dataStart + reads + writes;
-        const bool extensionRead = second && move.stage == 0;
-        const bool nextRead = move.stage == second;
-        const bool dataRead = reads && move.stage >= dataStart &&
-                              move.stage < dataStart + reads;
-        const bool followingRead = move.stage == followingStage;
-        const bool dataWrite = writes && move.stage >= dataStart &&
-                               move.stage < dataStart + writes;
-        const unsigned dataPart = dataRead || dataWrite ? move.stage - dataStart : 0;
-        const std::uint32_t address = extensionRead ? state_.pc + 4 : nextRead    ? state_.pc + 2 + move.extensions * 2
-                                                                  : followingRead ? state_.pc + 4 + move.extensions * 2
-                                                                                  : move.address + (move.size == 4 ? dataPart * 2 : 0);
-        const std::uint16_t word = move.size == 4 ? static_cast<std::uint16_t>(dataPart == 0 ? move.value >> 16 : move.value) : static_cast<std::uint16_t>(move.value);
-        const bool supervisor = (state_.sr & 0x2000) != 0;
-        if (transfer(address, move.size == 1 && (dataRead || dataWrite), dataWrite,
-                     word, dataRead || dataWrite ? (supervisor ? 5 : 1) : (supervisor ? 6 : 2)) != TransferResult::Complete)
-            return;
-
-        if (extensionRead)
-        {
-            // O endereço absoluto longo e o imediato longo usam as duas extensões.
-            if (move.mode == 7 && move.reg == 1)
-                move.address = moveMemoryAddress(move.mode, move.reg,
-                                                 state_.address, state_.data, move.firstExtension, pendingWord_,
-                                                 state_.pc + 2);
-            if (move.immediate)
-                move.value = (std::uint32_t(move.firstExtension) << 16) | pendingWord_;
-        }
-        else if (nextRead)
-            move.nextOpcode = pendingWord_;
-        else if (dataRead)
-        {
-            const std::uint32_t part = move.size == 1 ? pendingByte_ : pendingWord_;
-            move.value = move.size == 4 && dataPart == 0 ? part << 16 : move.value | part;
-        }
-        else if (followingRead)
-            move.nextFollowing = pendingWord_;
-
-        if (++move.stage != followingStage + 1)
-            return;
-
-        const std::uint32_t mask = move.size == 1 ? 0xffu : move.size == 2 ? 0xffffu
-                                                                           : 0xffffffffu;
-        const std::uint32_t sign = move.size == 1 ? 0x80u : move.size == 2 ? 0x8000u
-                                                                           : 0x80000000u;
-        const std::uint32_t value = move.value & mask;
-        if (!move.store)
-            state_.data[move.dataReg] = (state_.data[move.dataReg] & ~mask) | value;
-        state_.sr = (state_.sr & ~std::uint16_t(0x0f)) |
-                    (value & sign ? 0x08 : 0) | (value == 0 ? 0x04 : 0);
-        state_.prefetch = {move.nextOpcode, move.nextFollowing};
-        state_.pc += 2 + move.extensions * 2;
-        ++state_.instructions;
-        memoryOp_ = MemoryOp::None;
-        tracePending_ = traceInstruction_;
-        traceInstruction_ = false;
-    }
-
     void Moto68000::finishCombinedMove()
     {
         const auto &move = combinedMove_;
         const std::uint32_t mask = move.size == 1 ? 0xffu : move.size == 2 ? 0xffffu
                                                                            : 0xffffffffu;
-        const std::uint32_t sign = move.size == 1 ? 0x80u : move.size == 2 ? 0x8000u
-                                                                           : 0x80000000u;
         const std::uint32_t value = move.value & mask;
         if (move.targetMode == 0)
             state_.data[move.targetReg] =
@@ -815,8 +782,7 @@ namespace R2MEGA::Core
             state_.address[move.targetReg] = move.size == 2 ? static_cast<std::uint32_t>(signedWord(static_cast<std::uint16_t>(value))) : value;
         // MOVEA preserva todos os bits do SR; MOVE atualiza N/Z e limpa V/C.
         if (move.targetMode != 1)
-            state_.sr = (state_.sr & ~std::uint16_t(0x0f)) |
-                        (value & sign ? 0x08 : 0) | (value == 0 ? 0x04 : 0);
+            state_.sr = moveStatus(state_.sr, value, move.size);
         state_.prefetch = {move.nextOpcode, move.nextFollowing};
         state_.pc += 2 + 2 * (move.sourceExtensions + move.targetExtensions);
         ++state_.instructions;
@@ -856,20 +822,16 @@ namespace R2MEGA::Core
             switch (move.phase)
             {
             case CombinedMove::Phase::SourceExtensions:
-                if (move.sourceFetchesLeft)
-                {
-                    if (fetchProgram())
-                        --move.sourceFetchesLeft;
-                    return;
-                }
-                move.phase = CombinedMove::Phase::SourceIdle;
-                continue;
-
-            case CombinedMove::Phase::SourceIdle:
                 if (move.sourceIdle)
                 {
                     --move.sourceIdle;
                     bus_.observe(pins_);
+                    return;
+                }
+                if (move.sourceFetchesLeft)
+                {
+                    if (fetchProgram())
+                        --move.sourceFetchesLeft;
                     return;
                 }
                 move.phase = CombinedMove::Phase::SourceRead;
@@ -895,6 +857,8 @@ namespace R2MEGA::Core
                     move.sourceAddress = moveMemoryAddress(move.sourceMode, move.sourceReg,
                                                            state_.address, state_.data, move.sourceExtension[0],
                                                            move.sourceExtension[1], state_.pc + 2);
+                    if (move.sourceMode == 3 && move.size == 2)
+                        state_.address[move.sourceReg] += step;
                     move.sourceAddressReady = true;
                 }
                 // Fontes relativas ao PC leem o espaço de programa.
@@ -903,13 +867,14 @@ namespace R2MEGA::Core
                              move.sourceMode == 7 &&
                                      (move.sourceReg == 2 || move.sourceReg == 3)
                                  ? programCode
-                                 : dataCode) == TransferResult::Complete)
+                                 : dataCode,
+                             true) == TransferResult::Complete)
                 {
                     const std::uint32_t part = move.size == 1 ? pendingByte_ : pendingWord_;
                     move.value = move.size == 4 && move.sourceReads == 0 ? part << 16 : move.value | part;
                     if (++move.sourceReads == words)
                     {
-                        if (move.sourceMode == 3)
+                        if (move.sourceMode == 3 && move.size != 2)
                             state_.address[move.sourceReg] += step;
                         move.phase = CombinedMove::Phase::TargetExtensions;
                     }
@@ -917,16 +882,16 @@ namespace R2MEGA::Core
                 return;
 
             case CombinedMove::Phase::TargetExtensions:
-                if (move.targetFetchesLeft)
-                {
-                    if (fetchProgram())
-                        --move.targetFetchesLeft;
-                    return;
-                }
                 if (move.targetIdle)
                 {
                     --move.targetIdle;
                     bus_.observe(pins_);
+                    return;
+                }
+                if (move.targetFetchesLeft)
+                {
+                    if (fetchProgram())
+                        --move.targetFetchesLeft;
                     return;
                 }
                 move.phase = move.targetMode <= 1 ? CombinedMove::Phase::PrefetchAfterWrite : move.targetMode == 4 ? CombinedMove::Phase::PrefetchBeforeWrite
@@ -939,37 +904,40 @@ namespace R2MEGA::Core
                 return;
 
             case CombinedMove::Phase::Write:
+            {
+                const bool reverse = move.targetMode == 4 && move.size == 4;
                 if (!move.targetAddressReady)
                 {
                     const unsigned targetStep = move.size == 1 && move.targetReg == 7 ? 2 : move.size;
-                    if (move.targetMode == 4)
+                    if (move.targetMode == 4 && !reverse)
                         state_.address[move.targetReg] -= targetStep;
                     move.targetAddress = moveMemoryAddress(move.targetMode, move.targetReg,
                                                            state_.address, state_.data, move.targetExtension[0],
-                                                           move.targetExtension[1], state_.pc + 2);
+                                                           move.targetExtension[1], state_.pc + 2) -
+                                         (reverse ? 4 : 0);
                     move.targetAddressReady = true;
                 }
+                const unsigned part = move.targetWrites;
+                const std::uint32_t address = move.targetAddress +
+                                              (move.size == 4 ? (reverse ? 1 - part : part) * 2 : 0);
+                const std::uint16_t value = move.size == 4 ? static_cast<std::uint16_t>((part == 0) == !reverse ? move.value >> 16 : move.value) : static_cast<std::uint16_t>(move.value);
+                if (transfer(address, move.size == 1, true, value, dataCode, true) == TransferResult::Complete)
                 {
-                    const bool reverse = move.targetMode == 4 && move.size == 4;
-                    const unsigned part = move.targetWrites;
-                    const std::uint32_t address = move.targetAddress +
-                                                  (move.size == 4 ? (reverse ? 1 - part : part) * 2 : 0);
-                    const std::uint16_t value = move.size == 4 ? static_cast<std::uint16_t>((part == 0) == !reverse ? move.value >> 16 : move.value) : static_cast<std::uint16_t>(move.value);
-                    if (transfer(address, move.size == 1, true, value, dataCode) == TransferResult::Complete)
+                    if (reverse)
+                        state_.address[move.targetReg] -= 2;
+                    if (++move.targetWrites == words)
                     {
-                        if (++move.targetWrites == words)
-                        {
-                            if (move.targetMode == 3)
-                                state_.address[move.targetReg] +=
-                                    move.size == 1 && move.targetReg == 7 ? 2 : move.size;
-                            if (move.targetMode == 4)
-                                finishCombinedMove();
-                            else
-                                move.phase = CombinedMove::Phase::PrefetchAfterWrite;
-                        }
+                        if (move.targetMode == 3)
+                            state_.address[move.targetReg] +=
+                                move.size == 1 && move.targetReg == 7 ? 2 : move.size;
+                        if (move.targetMode == 4)
+                            finishCombinedMove();
+                        else
+                            move.phase = CombinedMove::Phase::PrefetchAfterWrite;
                     }
                 }
                 return;
+            }
 
             case CombinedMove::Phase::PrefetchAfterWrite:
                 if (fetchProgram() && move.streamIndex ==
@@ -2474,13 +2442,14 @@ namespace R2MEGA::Core
         {
             if (op.stage < 2)
             {
-                if (transfer(op.base + op.stage * 2, false, false, 0, dataCode) != TransferResult::Complete)
+                if (transfer(op.base + op.stage * 2, false, false, 0, dataCode, true) != TransferResult::Complete)
                     return;
                 op.value = op.stage == 0 ? std::uint32_t(pendingWord_) << 16 : op.value | pendingWord_;
                 if (++op.stage == 2)
                 {
                     state_.address[op.reg] = op.value;
-                    state_.address[7] = (op.reg == 7 ? op.value : op.base) + 4;
+                    if (op.reg != 7)
+                        state_.address[7] = op.base + 4;
                 }
                 return;
             }
@@ -2624,12 +2593,7 @@ namespace R2MEGA::Core
         memoryStage_ = 0;
         memoryPrefetch_ = 0;
         memoryValue_ = 0;
-        memorySize_ = 2;
-        memoryMode_ = 2;
         memoryIdle_ = 0;
-        memoryAddress_ = 0;
-        memoryAddressReady_ = false;
-        extendedMove_ = {};
         combinedMove_ = {};
         testClearCompare_ = {};
         arithmetic_ = {};
@@ -2713,11 +2677,6 @@ namespace R2MEGA::Core
         if (controlOp_ != ControlOp::None)
         {
             clockControl();
-            return;
-        }
-        if (memoryOp_ == MemoryOp::ExtendedMove)
-        {
-            clockExtendedMove();
             return;
         }
         if (memoryOp_ == MemoryOp::CombinedMove)
@@ -2896,8 +2855,6 @@ namespace R2MEGA::Core
                 op.reg = opcode & 7;
                 op.oldAddress = state_.address[op.reg];
                 op.base = state_.address[op.reg];
-                if (op.unlink)
-                    state_.address[7] = op.base;
                 memoryOp_ = MemoryOp::Frame;
                 clockFrame();
                 return;
@@ -3143,58 +3100,19 @@ namespace R2MEGA::Core
                 clockControl();
                 return;
             }
-            else if ((opcode & 0xf1f8) == 0x41e8 ||
-                     (opcode & 0xf1f8) == 0x41f0 ||
-                     (opcode & 0xf1ff) == 0x41f8 ||
-                     (opcode & 0xf1ff) == 0x41f9 ||
-                     (opcode & 0xf1ff) == 0x41fa ||
-                     (opcode & 0xf1ff) == 0x41fb)
+            else if ((opcode & 0xf1c0) == 0x41c0)
             {
+                const unsigned mode = (opcode >> 3) & 7, reg = opcode & 7;
+                if (mode != 2 && mode != 5 && mode != 6 && !(mode == 7 && reg <= 3))
+                {
+                    beginException(4, state_.pc, false);
+                    bus_.observe(pins_);
+                    return;
+                }
                 memoryOp_ = MemoryOp::Lea;
                 memoryStage_ = 0;
                 memoryValue_ = 0;
-                memoryIdle_ = ((opcode >> 3) & 7) == 6 ||
-                                      (((opcode >> 3) & 7) == 7 && (opcode & 7) == 3)
-                                  ? 4
-                                  : 0;
-            }
-            else if ((opcode >> 12) >= 1 && (opcode >> 12) <= 3 &&
-                     (((((opcode >> 6) & 7) == 0) && (((opcode >> 3) & 7) >= 2) &&
-                       (((opcode >> 3) & 7) <= 4)) ||
-                      ((((opcode >> 3) & 7) == 0) && (((opcode >> 6) & 7) >= 2) &&
-                       (((opcode >> 6) & 7) <= 4))))
-            {
-                memoryOp_ = ((opcode >> 6) & 7) == 0 ? MemoryOp::Load : MemoryOp::Store;
-                memorySize_ = (opcode >> 12) == 1 ? 1 : (opcode >> 12) == 2 ? 4
-                                                                            : 2;
-                memoryMode_ = memoryOp_ == MemoryOp::Load ? (opcode >> 3) & 7 : (opcode >> 6) & 7;
-                memoryIdle_ = memoryOp_ == MemoryOp::Load && memoryMode_ == 4 ? 2 : 0;
-                memoryAddressReady_ = false;
-                memoryStage_ = 0;
-                memoryValue_ = 0;
-            }
-            else if (extendedMoveOpcode(opcode))
-            {
-                memoryOp_ = MemoryOp::ExtendedMove;
-                auto &move = extendedMove_;
-                move = {};
-                move.size = (opcode >> 12) == 1 ? 1 : (opcode >> 12) == 2 ? 4
-                                                                          : 2;
-                move.store = ((opcode >> 3) & 7) == 0;
-                move.mode = move.store ? (opcode >> 6) & 7 : (opcode >> 3) & 7;
-                move.reg = move.store ? (opcode >> 9) & 7 : opcode & 7;
-                move.dataReg = move.store ? opcode & 7 : (opcode >> 9) & 7;
-                move.immediate = !move.store && move.mode == 7 && move.reg == 4;
-                move.extensions = moveExtensionWords(move.mode, move.reg, move.size);
-                move.firstExtension = state_.prefetch[1];
-                move.value = move.store ? state_.data[move.dataReg] : move.immediate ? move.firstExtension
-                                                                                     : 0;
-                if (!move.immediate && move.extensions == 1)
-                    move.address = moveMemoryAddress(move.mode, move.reg,
-                                                     state_.address, state_.data, move.firstExtension, 0,
-                                                     state_.pc + 2);
-                clockExtendedMove();
-                return;
+                memoryIdle_ = mode == 6 || (mode == 7 && reg == 3) ? 2 : 0;
             }
             else if (combinedMoveOpcode(opcode))
             {
@@ -3826,24 +3744,7 @@ namespace R2MEGA::Core
         }
 
         const auto opcode = state_.prefetch[0];
-        const bool dataRead = memoryOp_ == MemoryOp::Load &&
-                              memoryStage_ < (memorySize_ == 4 ? 2u : 1u);
-        const bool dataWrite = memoryOp_ == MemoryOp::Store && memoryStage_ >= 1;
-        const bool byteTransfer = memorySize_ == 1 && (dataRead || dataWrite);
-        const unsigned addressReg = memoryOp_ == MemoryOp::Store ? (opcode >> 9) & 7 : opcode & 7;
-        if ((dataRead || dataWrite) && !memoryAddressReady_)
-        {
-            const unsigned step = memorySize_ == 1 && addressReg == 7 ? 2 : memorySize_;
-            if (memoryMode_ == 4)
-                state_.address[addressReg] -= step;
-            memoryAddress_ = moveMemoryAddress(memoryMode_, addressReg,
-                                               state_.address, state_.data, 0, 0, state_.pc + 2);
-            memoryAddressReady_ = true;
-        }
-        const unsigned dataPart = (dataRead || dataWrite) && memorySize_ == 4 ? (dataRead ? memoryStage_ : memoryStage_ - 1) : 0;
-        const bool reverseLongStore = dataWrite && memorySize_ == 4 && memoryMode_ == 4;
-        const std::uint32_t address = dataRead || dataWrite        ? memoryAddress_ + (reverseLongStore ? (1 - dataPart) * 2 : dataPart * 2)
-                                      : !resetComplete()           ? (resetRead_ < 4 ? resetRead_ * 2 : state_.pc + (resetRead_ - 4) * 2)
+        const std::uint32_t address = !resetComplete()             ? (resetRead_ < 4 ? resetRead_ * 2 : state_.pc + (resetRead_ - 4) * 2)
                                       : branchActive_              ? branchDbccExpired_
                                                                          ? (branchRead_ == 0 ? state_.pc + 2 + signedWord(state_.prefetch[1])
                                                                                              : state_.pc + 4 + (branchRead_ - 1) * 2)
@@ -3852,12 +3753,8 @@ namespace R2MEGA::Core
                                                                                 : state_.pc + 4)
                                       : memoryOp_ == MemoryOp::Lea ? state_.pc + 4 + memoryStage_ * 2
                                                                    : state_.pc + 4;
-        const std::uint32_t source = state_.data[opcode & 7];
-        const std::uint16_t writeValue = memorySize_ == 4 ? static_cast<std::uint16_t>((dataPart == 0) == !reverseLongStore ? source >> 16 : source) : static_cast<std::uint16_t>(source);
-        // Buscas usam o espaço de programa supervisor; operandos, o espaço de dados.
-        const bool supervisor = (state_.sr & 0x2000) != 0;
-        if (transfer(address, byteTransfer, dataWrite, writeValue,
-                     dataRead || dataWrite ? (supervisor ? 5 : 1) : (supervisor ? 6 : 2)) != TransferResult::Complete)
+        const unsigned programCode = state_.sr & 0x2000 ? 6 : 2;
+        if (transfer(address, false, false, 0, programCode) != TransferResult::Complete)
             return;
 
         if (resetRead_ < 4)
@@ -3881,85 +3778,30 @@ namespace R2MEGA::Core
         }
         else if (!resetComplete())
             state_.prefetch[resetRead_ - 4] = pendingWord_;
-        else if (memoryOp_ != MemoryOp::None)
+        else if (memoryOp_ == MemoryOp::Lea)
         {
-            if (memoryOp_ == MemoryOp::Lea)
+            const unsigned mode = (opcode >> 3) & 7, source = opcode & 7;
+            const unsigned extensions = moveExtensionWords(mode, source, 4);
+            const unsigned stage = memoryStage_++;
+            if (extensions == 2 && stage == 0)
+                memoryValue_ = pendingWord_; // Segunda palavra do endereço absoluto longo.
+            else if (stage < extensions)
             {
-                const unsigned sourceMode = (opcode >> 3) & 7;
-                const bool absoluteLong = sourceMode == 7 && (opcode & 7) == 1;
-                if (absoluteLong && memoryStage_ == 0)
-                {
-                    memoryValue_ = pendingWord_; // Segunda palavra do endereço absoluto longo.
-                    ++memoryStage_;
-                }
-                else if (memoryStage_++ == 0)
-                    memoryPrefetch_ = pendingWord_;
-                else if (absoluteLong && memoryStage_ == 2)
-                    memoryPrefetch_ = pendingWord_;
-                else
-                {
-                    const unsigned reg = (opcode >> 9) & 7;
-                    state_.address[reg] = moveMemoryAddress(sourceMode, opcode & 7,
-                                                            state_.address, state_.data,
-                                                            state_.prefetch[1], memoryValue_,
-                                                            state_.pc + 2);
-                    state_.prefetch = {memoryPrefetch_, pendingWord_};
-                    state_.pc += absoluteLong ? 6 : 4;
-                    ++state_.instructions;
-                    memoryOp_ = MemoryOp::None;
-                }
-            }
-            else if (memoryOp_ == MemoryOp::Load)
-            {
-                const unsigned dataReads = memorySize_ == 4 ? 2 : 1;
-                if (memoryStage_ < dataReads)
-                {
-                    const std::uint32_t part = memorySize_ == 1 ? pendingByte_ : pendingWord_;
-                    memoryValue_ = memorySize_ == 4 && memoryStage_ == 0
-                                       ? part << 16
-                                       : memoryValue_ | part;
-                    ++memoryStage_;
-                    if (memoryMode_ == 3 && memoryStage_ == dataReads)
-                        state_.address[addressReg] += memorySize_ == 1 && addressReg == 7 ? 2 : memorySize_;
-                }
-                else
-                {
-                    const unsigned reg = (opcode >> 9) & 7;
-                    const std::uint32_t mask = memorySize_ == 1 ? 0xffu : memorySize_ == 2 ? 0xffffu
-                                                                                           : 0xffffffffu;
-                    const std::uint32_t sign = memorySize_ == 1 ? 0x80u : memorySize_ == 2 ? 0x8000u
-                                                                                           : 0x80000000u;
-                    state_.data[reg] = (state_.data[reg] & ~mask) | memoryValue_;
-                    state_.sr = (state_.sr & ~std::uint16_t(0x0f)) |
-                                (memoryValue_ & sign ? 0x08 : 0) | (memoryValue_ == 0 ? 0x04 : 0);
-                    state_.prefetch = {state_.prefetch[1], pendingWord_};
-                    state_.pc += 2;
-                    ++state_.instructions;
-                    memoryOp_ = MemoryOp::None;
-                }
+                memoryPrefetch_ = pendingWord_;
+                if (mode == 6 || (mode == 7 && source == 3))
+                    memoryIdle_ = 2;
             }
             else
             {
-                if (memoryStage_ == 0)
-                {
-                    memoryPrefetch_ = pendingWord_;
-                    ++memoryStage_;
-                }
-                else if (++memoryStage_ == (memorySize_ == 4 ? 3u : 2u))
-                {
-                    if (memoryMode_ == 3)
-                        state_.address[addressReg] += memorySize_ == 1 && addressReg == 7 ? 2 : memorySize_;
-                    const unsigned bits = memorySize_ * 8;
-                    const std::uint32_t mask = memorySize_ == 4 ? 0xffffffffu : (1u << bits) - 1;
-                    const std::uint32_t sign = 1u << (bits - 1);
-                    const std::uint32_t value = source & mask;
-                    state_.sr = (state_.sr & ~std::uint16_t(0x0f)) |
-                                (value & sign ? 0x08 : 0) | (value == 0 ? 0x04 : 0);
-                    state_.prefetch = {state_.prefetch[1], memoryPrefetch_};
-                    state_.pc += 2;
-                    ++state_.instructions;
-                    memoryOp_ = MemoryOp::None;
-                }
+                const unsigned reg = (opcode >> 9) & 7;
+                state_.address[reg] = moveMemoryAddress(mode, source,
+                                                        state_.address, state_.data,
+                                                        state_.prefetch[1], memoryValue_,
+                                                        state_.pc + 2);
+                state_.prefetch = {extensions ? memoryPrefetch_ : state_.prefetch[1], pendingWord_};
+                state_.pc += 2 + extensions * 2;
+                ++state_.instructions;
+                memoryOp_ = MemoryOp::None;
             }
         }
         else if (branchActive_)

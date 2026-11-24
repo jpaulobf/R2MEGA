@@ -75,7 +75,6 @@ namespace R2MEGA::Core
         void clockReturn();
         void clockControl();
         void clockSystemInstruction();
-        void clockExtendedMove();
         void clockCombinedMove();
         void finishCombinedMove();
         void clockTestClearCompare();
@@ -142,9 +141,6 @@ namespace R2MEGA::Core
         {
             None,
             Lea,
-            Load,
-            Store,
-            ExtendedMove,
             CombinedMove,
             TestClearCompare,
             Arithmetic,
@@ -163,35 +159,13 @@ namespace R2MEGA::Core
         unsigned memoryStage_ = 0;
         std::uint16_t memoryPrefetch_ = 0;
         std::uint32_t memoryValue_ = 0;
-        unsigned memorySize_ = 2;
-        unsigned memoryMode_ = 2;
         unsigned memoryIdle_ = 0;
-        std::uint32_t memoryAddress_ = 0;
-        bool memoryAddressReady_ = false;
-        // Mantém as extensões e a pré-busca enquanto o MOVE acessa o barramento.
-        struct ExtendedMove
-        {
-            unsigned size = 2;
-            unsigned mode = 0;
-            unsigned reg = 0;
-            unsigned dataReg = 0;
-            unsigned extensions = 1;
-            unsigned stage = 0;
-            bool store = false;
-            bool immediate = false;
-            std::uint16_t firstExtension = 0;
-            std::uint16_t nextOpcode = 0;
-            std::uint16_t nextFollowing = 0;
-            std::uint32_t address = 0;
-            std::uint32_t value = 0;
-        } extendedMove_;
         // Separa as extensões da origem e do destino na ordem em que chegam da pré-busca.
         struct CombinedMove
         {
             enum class Phase
             {
                 SourceExtensions,
-                SourceIdle,
                 SourceRead,
                 TargetExtensions,
                 PrefetchBeforeWrite,
