@@ -40,6 +40,11 @@ namespace R2MEGA::Core
                 return 6;
             return horizontalInterruptPending_ && (registers_[0] & 0x10) ? 4 : 0;
         }
+        // A saída INT do Z80 vai do disparo vertical até o fim da primeira linha de VBlank.
+        bool z80InterruptAsserted() const
+        {
+            return line_ == visibleLines && cycleInLine_ > verticalInterruptCycle;
+        }
         void acknowledgeInterrupt(unsigned level);
         std::uint16_t readData();
         void writeControl(std::uint16_t value);
