@@ -291,7 +291,12 @@ namespace
         boot(postCpu);
         execute(postCpu);
         const auto postFlags = postCpu.state().sr;
-        execute(postCpu);
+        postincrement.transfers.clear();
+        postincrement.waitAddress = 0x300;
+        postincrement.waits = 2;
+        check(execute(postCpu) == 14 &&
+                  postincrement.transfers == std::vector<std::pair<char, std::uint32_t>>({{'r', 0x300}, {'R', 0x108}, {'w', 0x300}}),
+              "Scc lê o destino, faz a pré-busca e escreve uma vez após a espera");
         check(postincrement.byte(0x300) == 0xff && postCpu.state().address[0] == 0x301 &&
                   postCpu.state().sr == postFlags && postCpu.state().pc == 0x106,
               "SNE (An)+ deve escrever byte e incrementar o endereço sem alterar flags");
@@ -301,6 +306,7 @@ namespace
         bus.putWord(0x100, 0x56f8); // SNE $0300.W.
         bus.putWord(0x102, 0x0300);
         bus.putWord(0x104, 0x56c0); // SNE D0.
+        bus.putWord(0x106, 0x51c0); // SF D0.
         bus.bytes[0x300] = 0x12;
         Moto68000 cpu(bus);
         boot(cpu);
@@ -308,9 +314,10 @@ namespace
         execute(cpu);
         check(bus.byte(0x300) == 0xff && cpu.state().pc == 0x104 && cpu.state().sr == flags,
               "SNE absoluto curto deve escrever um byte sem alterar os flags");
-        execute(cpu);
-        check((cpu.state().data[0] & 0xff) == 0xff && cpu.state().sr == flags,
-              "SNE em Dn deve preservar os flags");
+        check(execute(cpu) == 6 && (cpu.state().data[0] & 0xff) == 0xff && cpu.state().sr == flags,
+              "Scc verdadeiro em Dn usa seis ciclos e preserva os flags");
+        check(execute(cpu) == 4 && (cpu.state().data[0] & 0xff) == 0 && cpu.state().sr == flags,
+              "Scc falso em Dn usa quatro ciclos e preserva os flags");
 
         Bus equal;
         equal.setup();
@@ -346,7 +353,7 @@ namespace
                   "Scc absoluto longo deve escrever o byte e manter flags e pré-busca");
             check(std::vector<std::pair<char, std::uint32_t>>(
                       absoluteLong.transfers.begin() + before, absoluteLong.transfers.end()) ==
-                      std::vector<std::pair<char, std::uint32_t>>({{'R', 0x104}, {'r', destination}, {'R', 0x106}, {'w', destination}, {'R', 0x108}}),
+                      std::vector<std::pair<char, std::uint32_t>>({{'R', 0x104}, {'R', 0x106}, {'r', destination}, {'R', 0x108}, {'w', destination}}),
                   "Scc absoluto longo deve buscar as extensões e escrever na ordem correta");
         }
     }

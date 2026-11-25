@@ -15,6 +15,12 @@ namespace
     {
         std::unordered_map<std::uint32_t, std::uint16_t> words;
         std::vector<std::uint32_t> reads;
+        std::vector<bool> activeCycles;
+
+        void observe(const M68KPins &pins) override
+        {
+            activeCycles.push_back(pins.active);
+        }
 
         void putLong(std::uint32_t address, std::uint32_t value)
         {
@@ -108,6 +114,7 @@ namespace
         check((cpu.state().sr & 0x1f) == 0x1b,
               "preparo das flags não terminou");
         bus.reads.clear();
+        bus.activeCycles.clear();
         check(execute(cpu) == expectedCycles &&
                   cpu.state().data[0] == expectedD0 &&
                   cpu.state().data[1] == expectedD1 &&
@@ -119,6 +126,11 @@ namespace
         check(bus.reads == std::vector<std::uint32_t>{0x11c} &&
                   cpu.state().pc == 0x11a,
               label + ": pré-busca");
+        std::vector<bool> expectedBus(expectedCycles, false);
+        for (unsigned cycle = 0; cycle < 4; ++cycle)
+            expectedBus[cycle] = true;
+        check(bus.activeCycles == expectedBus,
+              label + ": pré-busca antes dos ciclos internos");
         check(execute(cpu) == 4 && cpu.state().pc == 0x11c,
               label + ": próxima instrução");
     }

@@ -102,6 +102,8 @@ int main()
           "TRAP alcança o tratador em 34 ciclos");
     check(trapCpu.state().instructions == 1, "TRAP conta como instrução concluída");
     checkShortFrame(trap, 0x0102);
+    check(trap.writes == std::vector<std::uint32_t>({0xffe, 0xffa, 0xffc}),
+          "TRAP empilha PC baixo, SR e PC alto");
     run(trapCpu, 4);
     check(trapCpu.state().data[0] == 7 && trapCpu.state().pc == 0x202,
           "tratador executado");
@@ -186,6 +188,8 @@ int main()
 
     for (const auto [opcode, vector] : {
              std::pair<std::uint16_t, unsigned>{0x4afc, 4},
+             {0x4e80, 4}, // JSR D0 é reservado.
+             {0x4ec0, 4}, // JMP D0 é reservado.
              {0xa123, 10},
              {0xf456, 11}})
     {

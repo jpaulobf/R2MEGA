@@ -80,7 +80,7 @@ namespace
     {
         check(bus.words.at(0xffc) == 0 && bus.words.at(0xffe) == address,
               "endereço de retorno na pilha");
-        check(bus.writes == std::vector<std::uint32_t>({0xffe, 0xffc}),
+        check(bus.writes == std::vector<std::uint32_t>({0xffc, 0xffe}),
               "ordem das duas escritas do retorno");
     }
 }
@@ -152,6 +152,21 @@ int main()
     checkReturn(registerCall, 0x0106);
     run(registerCpu, 16);
     check(registerCpu.state().pc == 0x106, "RTS após JSR (An)");
+
+    Bus overlappingCall;
+    setup(overlappingCall);
+    overlappingCall.words[0x100] = 0x4eb8; // JSR $0FFC.W, no local do endereço de retorno.
+    overlappingCall.words[0x102] = 0x0ffc;
+    overlappingCall.words[0xffc] = 0x7207; // MOVEQ #7,D1.
+    Moto68000 overlappingCpu(overlappingCall);
+    overlappingCpu.reset();
+    run(overlappingCpu, 40 + 18);
+    checkReturn(overlappingCall, 0x104);
+    check(overlappingCpu.state().pc == 0xffc && overlappingCpu.state().prefetch[0] == 0x7207 &&
+              overlappingCpu.state().prefetch[1] == 0x0104,
+          "JSR busca o primeiro opcode antes da escrita e a palavra seguinte depois da escrita");
+    run(overlappingCpu, 4);
+    check(overlappingCpu.state().data[1] == 7, "JSR executa a primeira palavra da pré-busca");
 
     struct AbsoluteCase
     {
@@ -244,15 +259,46 @@ int main()
               "JMP muda PC sem usar a pilha");
     }
 
-    Bus oddTarget;
-    setup(oddTarget);
-    oddTarget.words[0x100] = 0x6101; // BSR para endereço ímpar.
-    Moto68000 oddCpu(oddTarget);
-    oddCpu.reset();
-    run(oddCpu, 40 + 2 + 8 + 50);
-    check(oddCpu.state().pc == 0x300 && !oddCpu.halted() &&
-              oddTarget.words.at(0xff4) == 0x6101 && oddTarget.words.at(0xff8) == 0x0103,
-          "erro de endereço na busca da subrotina");
+    struct OddTargetCase
+    {
+        std::uint16_t opcode, extension, target, savedPc, frameTop;
+        unsigned cyclesBeforeFault;
+    };
+    for (const auto &test : {
+             OddTargetCase{0x6101, 0x4e71, 0x0103, 0x0103, 0x0ffc, 10}, // BSR.B.
+             OddTargetCase{0x4e90, 0x4e71, 0x0201, 0x0102, 0x1000, 0},  // JSR (A0).
+             OddTargetCase{0x4ef9, 0, 0x0201, 0x0102, 0x1000, 4},       // JMP $201.L.
+             OddTargetCase{0x4e75, 0x4e71, 0x0201, 0x0102, 0x1004, 8}   // RTS.
+         })
+    {
+        Bus oddTarget;
+        setup(oddTarget);
+        oddTarget.words[0x104] = 0x0201;
+        oddTarget.words[0x1000] = 0;
+        oddTarget.words[0x1002] = 0x0201;
+        Moto68000::State initial;
+        initial.pc = 0x100;
+        initial.address[0] = 0x0201;
+        initial.prefetch = {test.opcode, test.extension};
+        Moto68000 oddCpu(oddTarget);
+        oddCpu.restoreInstructionBoundary(initial, 0, 0x1000);
+        run(oddCpu, test.cyclesBeforeFault + 58);
+        check(oddCpu.atInstructionBoundary() && oddCpu.state().pc == 0x300 &&
+                  oddCpu.state().address[7] == unsigned(test.frameTop - 14),
+              "destino ímpar entra no vetor 3 com a pilha do estágio da falha");
+        check(oddTarget.words.at(test.frameTop - 2) == test.savedPc &&
+                  oddTarget.words.at(test.frameTop - 8) == test.opcode &&
+                  oddTarget.words.at(test.frameTop - 10) == test.target &&
+                  oddTarget.words.at(test.frameTop - 14) == ((test.opcode & 0xffe0) | 0x16),
+              "quadro de endereço registra PC, IR e destino da pré-busca");
+        for (unsigned phase = 0; phase < 4; ++phase)
+        {
+            const auto &pins = oddTarget.trace.at(test.cyclesBeforeFault + phase);
+            check(pins.addressError && !pins.addressStrobe && pins.phase == phase &&
+                      pins.address == (test.target & ~1u) && pins.functionCode == 6,
+                  "pré-busca desalinhada ocupa quatro ciclos com AS desativado");
+        }
+    }
 
     Bus frame;
     setup(frame);
@@ -268,13 +314,15 @@ int main()
           "LEA prepara a moldura da pilha");
     frame.reads.clear();
     frame.writes.clear();
+    frame.trace.clear();
     run(frameCpu, 16);
     check(frameCpu.state().pc == 0x108 && frameCpu.state().address[6] == 0xffc &&
               frameCpu.state().address[7] == 0xff4 && frame.words.at(0xffc) == 0 &&
               frame.words.at(0xffe) == 0x0f00,
           "LINK salva An e reserva espaço na pilha em 16 ciclos");
-    check(frame.writes == std::vector<std::uint32_t>({0xffe, 0xffc}) &&
-              frame.reads == std::vector<std::uint32_t>({0x108, 0x10a}),
+    check(frame.writes == std::vector<std::uint32_t>({0xffc, 0xffe}) &&
+              frame.reads == std::vector<std::uint32_t>({0x108, 0x10a}) &&
+              frame.trace.at(0).address == 0x108 && frame.trace.at(12).address == 0x10a,
           "LINK escreve duas palavras e lê duas palavras de programa");
     frame.reads.clear();
     run(frameCpu, 12);
@@ -328,6 +376,7 @@ int main()
         run(cpu, 40);
         bus.reads.clear();
         bus.writes.clear();
+        bus.trace.clear();
         run(cpu, test.cycles);
         check(cpu.state().instructions == 1 && cpu.state().pc == test.nextPc &&
                   cpu.state().address[7] == 0xffc && cpu.state().sr == 0x2700,
@@ -336,10 +385,14 @@ int main()
               "PEA deve escrever as duas palavras da pilha");
         check(bus.words.at(0xffc) == std::uint16_t(test.address >> 16) &&
                   bus.words.at(0xffe) == std::uint16_t(test.address) &&
-                  bus.writes == std::vector<std::uint32_t>({0xffe, 0xffc}),
+                  bus.writes == std::vector<std::uint32_t>({0xffc, 0xffe}),
               "PEA empilha o endereço efetivo em ordem correta");
         check(cpu.state().prefetch[0] ==
                   (bus.words.count(test.nextPc) ? bus.words.at(test.nextPc) : 0x4e71),
               "PEA preserva a próxima instrução na pré-busca");
+        const bool absolute = test.opcode == 0x4878 || test.opcode == 0x4879;
+        const auto &following = bus.trace.at(test.cycles - (absolute ? 4 : 12));
+        check(following.active && !following.write && following.address == test.nextPc + 2,
+              "PEA busca a segunda palavra após a escrita nas formas absolutas e antes nas demais");
     }
 }

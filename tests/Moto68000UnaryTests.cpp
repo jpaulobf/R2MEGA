@@ -16,6 +16,7 @@ namespace
     {
         std::unordered_map<std::uint32_t, std::uint8_t> bytes;
         std::vector<std::pair<char, std::uint32_t>> transfers;
+        std::vector<M68KPins> samplePins;
         std::uint32_t waitAddress = 0xffffffffu;
         unsigned writeWaits = 0;
         void putWord(std::uint32_t address, std::uint16_t value)
@@ -88,6 +89,11 @@ namespace
             }
             writeWord(address, value);
             return true;
+        }
+        void observe(const M68KPins &pins) override
+        {
+            if (pins.readModifyWrite)
+                samplePins.push_back(pins);
         }
         void setup()
         {
@@ -314,6 +320,38 @@ namespace
         check(memory.transfers ==
                   std::vector<std::pair<char, std::uint32_t>>({{'r', 0x1100}, {'w', 0x1100}, {'R', 0x108}}),
               "TAS mantém leitura e escrita juntas antes da pré-busca");
+        check(memory.samplePins.size() == 10 && !memory.samplePins[0].addressStrobe,
+              "TAS ocupa dez ciclos no barramento");
+        for (unsigned cycle = 1; cycle < memory.samplePins.size(); ++cycle)
+        {
+            const auto &pins = memory.samplePins[cycle];
+            check(pins.active && pins.addressStrobe && pins.address == 0x1100 &&
+                      pins.functionCode == 5 && pins.write == (cycle >= 7) &&
+                      pins.upperDataStrobe == (cycle <= 3 || cycle >= 8) &&
+                      !pins.lowerDataStrobe,
+                  "TAS mantém AS durante leitura, modificação e escrita");
+        }
+
+        Bus wait;
+        wait.setup();
+        wait.putWord(0x100, 0x4af8); // TAS ($1101).W.
+        wait.putWord(0x102, 0x1101);
+        wait.bytes[0x1101] = 0x40;
+        wait.waitAddress = 0x1101;
+        wait.writeWaits = 2;
+        Moto68000 waitCpu(wait);
+        boot(waitCpu);
+        wait.transfers.clear();
+        check(execute(waitCpu) == 20 && wait.byte(0x1101) == 0xc0 &&
+                  wait.samplePins.size() == 12,
+              "TAS em byte ímpar mantém o ciclo indivisível durante espera");
+        check(wait.samplePins[8].waiting && wait.samplePins[9].waiting &&
+                  wait.samplePins[8].addressStrobe && wait.samplePins[9].addressStrobe &&
+                  wait.samplePins[8].lowerDataStrobe && !wait.samplePins[8].upperDataStrobe,
+              "TAS em byte ímpar mantém AS e LDS durante DTACK");
+        check(wait.transfers ==
+                  std::vector<std::pair<char, std::uint32_t>>({{'R', 0x104}, {'r', 0x1101}, {'w', 0x1101}, {'R', 0x106}}),
+              "TAS com espera grava o byte uma vez");
 
         Bus stack;
         stack.setup();

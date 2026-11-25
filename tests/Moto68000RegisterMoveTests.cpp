@@ -313,18 +313,13 @@ int main()
         Bus bus;
         bus.setup();
         bus.putWord(0x100, invalid);
+        bus.putWord(0x10, 0);
+        bus.putWord(0x12, 0x200);
         Moto68000 cpu(bus);
         cpu.reset();
-        run(cpu, 40);
-        bool rejected = false;
-        try
-        {
-            cpu.clock();
-        }
-        catch (const std::logic_error &)
-        {
-            rejected = true;
-        }
-        check(rejected, "MOVE.B com registrador de endereço deve ser recusado");
+        run(cpu, 40 + 34);
+        check(cpu.atInstructionBoundary() && cpu.state().pc == 0x200 &&
+                  cpu.lastException().vector == 4 && cpu.lastException().opcode == invalid,
+              "MOVE.B com registrador de endereço aciona o vetor 4");
     }
 }

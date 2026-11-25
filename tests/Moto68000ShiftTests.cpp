@@ -17,8 +17,14 @@ namespace
         std::unordered_map<std::uint32_t, std::uint16_t> words;
         std::vector<std::uint32_t> reads;
         std::vector<std::pair<char, std::uint32_t>> transfers;
+        std::vector<bool> activeCycles;
         std::uint32_t waitAddress = 0xffffffffu;
         unsigned writeWaits = 0;
+
+        void observe(const M68KPins &pins) override
+        {
+            activeCycles.push_back(pins.active);
+        }
 
         void putLong(std::uint32_t address, std::uint32_t value)
         {
@@ -176,6 +182,7 @@ namespace
             for (unsigned i = 0; i < 4; ++i)
                 execute(cpu);
             bus.reads.clear();
+            bus.activeCycles.clear();
             check(execute(cpu) == test.cycles &&
                       cpu.state().data[0] == test.result &&
                       cpu.state().data[1] == test.count &&
@@ -184,6 +191,11 @@ namespace
             check(bus.reads == std::vector<std::uint32_t>{0x114} &&
                       cpu.state().pc == 0x112,
                   std::string(test.label) + ": pré-busca");
+            std::vector<bool> expectedBus(test.cycles, false);
+            for (unsigned cycle = 0; cycle < 4; ++cycle)
+                expectedBus[cycle] = true;
+            check(bus.activeCycles == expectedBus,
+                  std::string(test.label) + ": pré-busca antes dos ciclos internos");
         }
     }
 
@@ -232,6 +244,7 @@ namespace
                 for (unsigned i = 0; i < 3; ++i)
                     execute(cpu);
                 bus.transfers.clear();
+                bus.activeCycles.clear();
                 const std::string label = "deslocamento em memória " +
                                           std::to_string(operation) + " modo " +
                                           std::to_string(mode.mode) + "/" +
@@ -252,6 +265,9 @@ namespace
                 expected.emplace_back('W', 0x1100);
                 check(bus.transfers == expected,
                       label + ": ordem do barramento");
+                if (mode.mode == 6)
+                    check(!bus.activeCycles.at(0) && !bus.activeCycles.at(1) && bus.activeCycles.at(2),
+                          label + ": cálculo do índice antes da pré-busca");
             }
     }
 

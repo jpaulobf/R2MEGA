@@ -109,12 +109,14 @@ namespace
                 return;
             }
             ++transferCycles;
-            if (pins.phase == 3)
+            if (pins.phase == 3 && (!pins.readModifyWrite || pins.write))
             {
                 const bool word = pins.upperDataStrobe && pins.lowerDataStrobe;
                 const auto data = word ? pins.data : pins.upperDataStrobe ? pins.data >> 8
                                                                           : pins.data & 0xff;
-                trace.push_back({pins.write ? 2u : 1u, transferCycles, pins.functionCode,
+                const unsigned kind = pins.readModifyWrite ? 3 : pins.write ? 2
+                                                                            : 1;
+                trace.push_back({kind, transferCycles, pins.functionCode,
                                  pins.address, word ? 2u : 1u, static_cast<unsigned>(data)});
                 transferCycles = 0;
             }

@@ -16,8 +16,13 @@ namespace
     {
         std::unordered_map<std::uint32_t, std::uint8_t> bytes;
         std::vector<std::pair<char, std::uint32_t>> transfers;
+        std::vector<bool> activeCycles;
         std::uint32_t waitAddress = 0xffffffffu;
         unsigned writeWaits = 0;
+        void observe(const M68KPins &pins) override
+        {
+            activeCycles.push_back(pins.active);
+        }
         void putWord(std::uint32_t address, std::uint16_t value)
         {
             bytes[address] = static_cast<std::uint8_t>(value >> 8);
@@ -144,6 +149,7 @@ namespace
                 execute(cpu);
             check((cpu.state().sr & 0x1f) == 0x1b, "preparo das flags");
             bus.transfers.clear();
+            bus.activeCycles.clear();
             const std::string label = "bit em D0 tipo " + std::to_string(test.kind) +
                                       " número " + std::to_string(test.bit);
             check(execute(cpu) == test.cycles && cpu.state().data[0] == test.result &&
@@ -152,6 +158,9 @@ namespace
             const std::vector<std::pair<char, std::uint32_t>> expected =
                 test.immediate ? std::vector<std::pair<char, std::uint32_t>>({{'R', 0x10c}, {'R', 0x10e}}) : std::vector<std::pair<char, std::uint32_t>>({{'R', 0x10c}});
             check(bus.transfers == expected, label + ": pré-busca");
+            std::vector<bool> expectedBus(test.immediate ? 8 : 4, true);
+            expectedBus.resize(test.cycles, false);
+            check(bus.activeCycles == expectedBus, label + ": pré-busca antes dos ciclos internos");
         }
     }
 
@@ -193,6 +202,7 @@ namespace
                     for (unsigned i = 0; i < 4; ++i)
                         execute(cpu);
                     bus.transfers.clear();
+                    bus.activeCycles.clear();
                     const std::string label = "bit memória tipo " +
                                               std::to_string(kind) + " modo " +
                                               std::to_string(mode.mode) + "/" + std::to_string(mode.reg) +
@@ -215,6 +225,13 @@ namespace
                     if (kind != 0)
                         expected.emplace_back('w', 0x1100);
                     check(bus.transfers == expected, label + ": ordem do barramento");
+                    if (mode.mode == 6)
+                    {
+                        const unsigned indexIdle = immediate ? 4 : 0;
+                        check(!bus.activeCycles.at(indexIdle) && !bus.activeCycles.at(indexIdle + 1) &&
+                                  bus.activeCycles.at(indexIdle + 2),
+                              label + ": cálculo do índice antes da pré-busca");
+                    }
                 }
     }
 
@@ -255,18 +272,27 @@ namespace
     {
         Bus bus;
         bus.setup();
-        bus.putWord(0x100, 0x083c); // BTST #1,#$02.
-        bus.putWord(0x102, 1);
-        bus.putWord(0x104, 2);
+        bus.putWord(0x100, 0x7201); // MOVEQ #1,D1.
+        bus.putWord(0x102, 0x033c); // BTST D1,#$02.
+        bus.putWord(0x104, 0x0002);
+        bus.putWord(0x106, 0x083c); // BTST com dois imediatos, codificação reservada.
         Moto68000 cpu(bus);
         boot(cpu);
+        execute(cpu);
         bus.transfers.clear();
-        check(execute(cpu) == 14 && (cpu.state().sr & 0x04) == 0 &&
+        bus.activeCycles.clear();
+        check(execute(cpu) == 10 && (cpu.state().sr & 0x04) == 0 &&
                   cpu.state().pc == 0x106,
-              "BTST lê o operando imediato após o número do bit");
+              "BTST aceita destino imediato com o número do bit em Dn");
         check(bus.transfers ==
-                  std::vector<std::pair<char, std::uint32_t>>({{'R', 0x104}, {'R', 0x106}, {'R', 0x108}}),
-              "BTST imediato preserva a ordem da pré-busca");
+                      std::vector<std::pair<char, std::uint32_t>>({{'R', 0x106}, {'R', 0x108}}) &&
+                  bus.activeCycles == std::vector<bool>({true, true, true, true, true, true, true, true, false, false}),
+              "BTST de destino imediato termina a pré-busca antes dos ciclos internos");
+        for (unsigned cycle = 0; cycle < 34; ++cycle)
+            cpu.clock();
+        check(cpu.lastException().vector == 4 && cpu.lastException().pc == 0x106 &&
+                  cpu.lastException().opcode == 0x083c && cpu.state().pc == 0x200,
+              "BTST com dois imediatos gera exceção de instrução ilegal");
     }
 
     void stackAndWait()

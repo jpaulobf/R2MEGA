@@ -1,9 +1,11 @@
 #include "Common/RomFile.h"
 #include "Core/Cartridge/Cartridge.h"
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <string_view>
 #include <zlib.h>
 
 using namespace R2MEGA::Common;
@@ -39,6 +41,29 @@ static Bytes image()
     v[3] = 0x1a;
     v[4] = 1;
     return v;
+}
+
+static void writeSegaHeader(Bytes &rom)
+{
+    std::fill(rom.begin() + 0x100, rom.begin() + 0x200, ' ');
+    const auto text = [&](std::size_t offset, std::string_view value)
+    { std::copy(value.begin(), value.end(), rom.begin() + offset); };
+    text(0x100, "SEGA GENESIS");
+    text(0x120, "DOMESTIC TITLE");
+    text(0x150, "  OVERSEAS\nTITLE");
+    text(0x180, "GM 12345678-01");
+    rom[0x18e] = 0xab;
+    rom[0x18f] = 0x34;
+    text(0x1f0, " JUE ");
+}
+
+static void checkSegaHeader(const Cartridge &cartridge)
+{
+    const auto header = cartridge.header();
+    check(header && header->console == "SEGA GENESIS" && header->domesticTitle == "DOMESTIC TITLE" &&
+              header->overseasTitle == "OVERSEAS?TITLE" && header->productCode == "GM 12345678-01" &&
+              header->checksum == 0xab34 && header->region == "JUE",
+          "Sega header in normalized ROM");
 }
 
 static Bytes archive(const Bytes &raw, bool deflated, bool descriptor, const std::string &name = "folder/game.md")
@@ -123,10 +148,16 @@ int main(int argc, char **argv)
         check(argc == 2, "fixture directory required");
         const std::filesystem::path dir = argv[1];
         std::filesystem::create_directories(dir);
-        const Bytes raw = image();
+        Bytes raw = image();
+        writeSegaHeader(raw);
         save(dir / "game.bin", raw);
         auto cartridge = Cartridge::load(dir / "game.bin");
         check(cartridge.rom() == raw && cartridge.romName() == "game.bin", "raw ROM loading");
+        checkSegaHeader(cartridge);
+        save(dir / "no-header.bin", image());
+        check(!Cartridge::load(dir / "no-header.bin").header(), "missing Sega header is optional");
+        save(dir / "short-header.bin", Bytes(raw.begin(), raw.begin() + 0x1ff));
+        check(!Cartridge::load(dir / "short-header.bin").header(), "incomplete Sega header is optional");
         for (bool deflated : {false, true})
             for (bool descriptor : {false, true})
             {
@@ -134,6 +165,7 @@ int main(int argc, char **argv)
                 save(dir / "game.zip", zip);
                 auto loaded = Cartridge::load(dir / "game.zip");
                 check(loaded.rom() == raw && loaded.romName() == "folder/GAME.MD", "ZIP loading");
+                checkSegaHeader(loaded);
             }
         const auto valid = archive(raw, true, false);
         for (size_t n = 0; n < valid.size(); ++n)
@@ -169,6 +201,7 @@ int main(int argc, char **argv)
         Bytes decoded(32768);
         for (size_t i = 0; i < decoded.size(); ++i)
             decoded[i] = uint8_t((i * 7 + i / 131) & 255);
+        writeSegaHeader(decoded);
         for (size_t block = 0; block < decoded.size(); block += 16384)
             for (size_t i = 0; i < 8192; ++i)
             {
@@ -176,9 +209,13 @@ int main(int argc, char **argv)
                 smd[512 + block + 8192 + i] = decoded[block + 2 * i];
             }
         save(dir / "game.smd", smd);
-        check(Cartridge::load(dir / "game.smd").rom() == decoded, "SMD conversion");
+        const auto smdCartridge = Cartridge::load(dir / "game.smd");
+        check(smdCartridge.rom() == decoded, "SMD conversion");
+        checkSegaHeader(smdCartridge);
         save(dir / "game.zip", archive(smd, true, false, "GAME.SMD"));
-        check(Cartridge::load(dir / "game.zip").rom() == decoded, "SMD in ZIP conversion");
+        const auto zippedSmd = Cartridge::load(dir / "game.zip");
+        check(zippedSmd.rom() == decoded, "SMD in ZIP conversion");
+        checkSegaHeader(zippedSmd);
         smd.pop_back();
         save(dir / "game.smd", smd);
         bool rejected = false;

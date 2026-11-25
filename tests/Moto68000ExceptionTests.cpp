@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 using namespace R2MEGA::Core;
@@ -162,6 +163,27 @@ int main()
           "MOVE.L lê a origem antes da tentativa de escrita, sem pré-busca antecipada");
     checkAddressErrorFrame(oddLongWrite, 0x2290, 0x0501, 0x2285, 0x108, 0x2710);
 
+    Bus oddShift;
+    setup(oddShift, 0x0401, 0xe3df); // LSL.W (A7)+ em modo usuário.
+    Moto68000::State shiftState;
+    shiftState.pc = 0x104;
+    shiftState.sr = 0x0019;
+    shiftState.prefetch = {0xe3df, 0x4e71};
+    Moto68000 shiftCpu(oddShift);
+    shiftCpu.restoreInstructionBoundary(shiftState, 0x0401, 0x1000);
+    run(shiftCpu, 58);
+    check(shiftCpu.atInstructionBoundary() && shiftCpu.state().pc == 0x200 &&
+              shiftCpu.supervisorStackPointer() == 0xff2 && shiftCpu.userStackPointer() == 0x0403,
+          "LSL.W desalinhado conserva o pós-incremento e usa o SSP");
+    checkAddressErrorFrame(oddShift, 0xe3df, 0x0401, 0xe3d1, 0x106, 0x0019);
+    for (unsigned phase = 0; phase < 4; ++phase)
+    {
+        const auto &pins = oddShift.trace.at(phase);
+        check(pins.addressError && !pins.addressStrobe && pins.address == 0x0400 &&
+                  !pins.write && pins.phase == phase && pins.functionCode == 1,
+              "LSL.W apresenta a leitura desalinhada durante quatro ciclos sem AS");
+    }
+
     Bus oddInstruction;
     setup(oddInstruction, 0x0400, 0x3010);
     oddInstruction.words[0x100] = 0x6001; // BRA para $103, endereço de instrução ímpar
@@ -202,6 +224,63 @@ int main()
           "diagnóstico preserva PC e opcode antes do tratador de instrução ilegal");
     illegalCpu.reset();
     check(illegalCpu.lastException().serial == 0, "reset limpa o diagnóstico anterior");
+
+    for (const auto [opcode, vector] : {std::pair{0x4e74u, 4u}, std::pair{0x7100u, 4u},
+                                        std::pair{0xa123u, 10u}, std::pair{0xf456u, 11u}})
+    {
+        Bus bus;
+        bus.words[vector * 4] = 0;
+        bus.words[vector * 4 + 2] = 0x200;
+        bus.words[0x200] = 0x7412;
+        bus.words[0x202] = 0x4e71;
+        Moto68000 cpu(bus);
+        Moto68000::State initial{};
+        initial.pc = 0x100;
+        initial.sr = 0x8004;
+        initial.prefetch = {static_cast<std::uint16_t>(opcode), 0x4e71};
+        cpu.restoreInstructionBoundary(initial, 0x1800, 0x1000);
+        run(cpu, 34);
+        check(cpu.atInstructionBoundary() && cpu.state().pc == 0x200 &&
+                  cpu.state().prefetch[0] == 0x7412 && cpu.state().instructions == 0,
+              "opcode reservado chega ao tratador em 34 ciclos");
+        check(cpu.userStackPointer() == 0x1800 && cpu.supervisorStackPointer() == 0xffa &&
+                  cpu.state().sr == 0x2004 && bus.words.at(0xffa) == 0x8004 &&
+                  bus.words.at(0xffc) == 0 && bus.words.at(0xffe) == 0x100,
+              "exceção de opcode preserva PC e SR na pilha de supervisor");
+        check(bus.writes == std::vector<std::uint32_t>({0xffe, 0xffa, 0xffc}) &&
+                  bus.reads == std::vector<std::uint32_t>({vector * 4, vector * 4 + 2, 0x200, 0x202}),
+              "sequência de empilhamento, vetor e pré-busca para opcode reservado");
+    }
+
+    for (std::uint16_t opcode : {std::uint16_t(0xd2d8),  // ADDA.W (A0)+,A1.
+                                 std::uint16_t(0x93d8),  // SUBA.L (A0)+,A1.
+                                 std::uint16_t(0xb3d8)}) // CMPA.L (A0)+,A1.
+    {
+        Bus bus;
+        bus.words[12] = 0;
+        bus.words[14] = 0x200;
+        Moto68000 cpu(bus);
+        Moto68000::State initial{};
+        initial.pc = 0x100;
+        initial.sr = 0x2713;
+        initial.address[0] = 0x401;
+        initial.address[1] = 0x600;
+        initial.prefetch = {opcode, 0x4e71};
+        cpu.restoreInstructionBoundary(initial, 0x1800, 0x1000);
+        run(cpu, 58);
+        check(cpu.atInstructionBoundary() && cpu.state().pc == 0x200 &&
+                  cpu.state().address[0] == (opcode == 0xd2d8 ? 0x403u : 0x401u) &&
+                  cpu.state().address[1] == 0x600,
+              "aritmética em An preserva o destino e só efetiva pós-incremento de palavra antes da falha");
+        checkAddressErrorFrame(bus, opcode, 0x401, (opcode & 0xffe0) | 0x15, 0x102, initial.sr);
+        for (unsigned phase = 0; phase < 4; ++phase)
+        {
+            const auto &pins = bus.trace.at(phase);
+            check(pins.addressError && pins.phase == phase && pins.address == 0x400 &&
+                      !pins.addressStrobe && !pins.write && pins.functionCode == 5,
+                  "aritmética em An apresenta o endereço desalinhado antes do quadro de exceção");
+        }
+    }
 
     Bus writeFault;
     setup(writeFault, 0x0400, 0x3080); // MOVE.W D0,(A0)
