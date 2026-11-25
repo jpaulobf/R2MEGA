@@ -5,12 +5,57 @@
 #include "Window/Window.h"
 #include "Core/Cartridge/Cartridge.h"
 #include "Core/Board.h"
-#include <optional>
+#include <algorithm>
 #include <exception>
+#include <iomanip>
 #include <iostream>
+#include <optional>
+#include <sstream>
+#include <string_view>
 
 namespace R2MEGA::Systems
 {
+    namespace
+    {
+        void reportLoadedCartridge(const Core::Cartridge &cartridge)
+        {
+            const auto singleLine = [](std::string value)
+            {
+                std::replace_if(value.begin(), value.end(), [](unsigned char character)
+                                { return character < 0x20 || character == 0x7f; }, '?');
+                return value;
+            };
+            std::ostringstream report;
+            report << "System: Mega Drive / Genesis (NTSC)\n"
+                   << "File: " << singleLine(cartridge.path().u8string()) << '\n';
+            if (cartridge.romName() != cartridge.path().filename().u8string())
+                report << "ZIP entry: " << singleLine(cartridge.romName()) << '\n';
+            report << "ROM: " << cartridge.rom().size() << " bytes"
+                   << " | System RAM: " << Core::WorkRAM::size() << " bytes"
+                   << " | Z80 RAM: " << Core::AudioRAM::size() << " bytes"
+                   << " | VRAM: " << Core::VRAM::size() << " bytes\n";
+
+            if (const auto header = cartridge.header())
+            {
+                const auto orUnknown = [](std::string_view text)
+                { return text.empty() ? std::string_view("unknown") : text; };
+                const auto &title = header->overseasTitle.empty() ? header->domesticTitle : header->overseasTitle;
+                report << "Sega header: 0x" << std::hex << std::uppercase << std::setfill('0')
+                       << std::setw(4) << Core::Cartridge::Header::offset
+                       << " | Region: " << orUnknown(header->region)
+                       << " | Header checksum: 0x" << std::setw(4) << header->checksum << std::dec << '\n'
+                       << "Title: " << orUnknown(title) << " | Product: " << orUnknown(header->productCode)
+                       << " | Console ID: " << header->console << '\n';
+            }
+            else
+                report << "Sega header: unavailable\n";
+
+            report << "Video: Mode 5, H32/H40, " << Core::VDP::visibleLines
+                   << " lines | Controllers: 3-button\n";
+            std::cout << report.str() << std::flush;
+        }
+    }
+
     int Engine::run()
     {
         try
@@ -91,6 +136,7 @@ namespace R2MEGA::Systems
                 running = true;
                 paused = false;
                 resetTiming = true;
+                reportLoadedCartridge(*cartridge);
                 frameCounter.reset(Clock::now());
                 return name; }, [&cartridge, &board]() -> const std::uint32_t *
                                   { return cartridge ? board.vdp().pixels().data() : nullptr; },
