@@ -39,6 +39,7 @@ namespace R2MEGA::Core
         bool waiting = false;
         bool dataValid = false;
         bool write = false;
+        bool readModifyWrite = false; // Inclui os ciclos internos com AS ativo.
         bool resetAsserted = false;
         bool addressError = false;
         bool interruptAcknowledge = false;
