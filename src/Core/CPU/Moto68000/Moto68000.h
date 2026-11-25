@@ -74,6 +74,8 @@ namespace R2MEGA::Core
         void clockInterruptAcknowledge();
         void clockReturn();
         void clockControl();
+        void clockPea();
+        bool pushLongWord(std::uint32_t value, bool lowWord);
         void clockSystemInstruction();
         void clockCombinedMove();
         void finishCombinedMove();
@@ -101,12 +103,6 @@ namespace R2MEGA::Core
         std::uint16_t pendingWord_ = 0;
         M68KPins pins_;
         bool branchActive_ = false;
-        bool sccActive_ = false;
-        unsigned sccStage_ = 0;
-        unsigned sccMode_ = 0, sccReg_ = 0, sccLength_ = 2;
-        std::uint32_t sccAddress_ = 0;
-        std::uint8_t sccValue_ = 0;
-        std::uint16_t sccNextOpcode_ = 0;
         unsigned branchIdle_ = 0;
         unsigned branchRead_ = 0;
         std::uint32_t branchTarget_ = 0;
@@ -135,7 +131,7 @@ namespace R2MEGA::Core
         std::uint32_t controlTarget_ = 0;
         std::uint32_t controlReturn_ = 0;
         std::uint16_t controlIr_ = 0;
-        std::uint16_t controlNextOpcode_ = 0;
+        std::uint16_t controlNextOpcode_ = 0, controlNextFollowing_ = 0;
         unsigned controlExtensions_ = 0;
         enum class MemoryOp
         {
@@ -153,13 +149,33 @@ namespace R2MEGA::Core
             Movep,
             Movem,
             StatusMove,
-            Frame
+            Frame,
+            Scc
         };
         MemoryOp memoryOp_ = MemoryOp::None;
         unsigned memoryStage_ = 0;
         std::uint16_t memoryPrefetch_ = 0;
         std::uint32_t memoryValue_ = 0;
         unsigned memoryIdle_ = 0;
+        struct Scc
+        {
+            enum class Phase
+            {
+                AddressIdle,
+                Extensions,
+                Read,
+                Prefetch,
+                Write,
+                FinalIdle
+            };
+            Phase phase = Phase::AddressIdle;
+            unsigned mode = 0, reg = 0, extensions = 0, streamIndex = 2;
+            unsigned idle = 0;
+            std::array<std::uint16_t, 2> extension{};
+            std::uint16_t nextOpcode = 0, nextFollowing = 0;
+            std::uint32_t address = 0;
+            std::uint8_t value = 0;
+        } scc_;
         // Separa as extensões da origem e do destino na ordem em que chegam da pré-busca.
         struct CombinedMove
         {
@@ -205,14 +221,17 @@ namespace R2MEGA::Core
                 Extensions,
                 Idle,
                 Read,
+                Modify,
                 Prefetch,
-                Write
+                Write,
+                FinalIdle
             };
             Kind kind = Kind::Test;
             Phase phase = Phase::Extensions;
             unsigned size = 2, mode = 0, reg = 0, destination = 0;
             unsigned extensions = 0, fetchesLeft = 0, streamIndex = 2;
-            unsigned idle = 0, reads = 0, writes = 0;
+            unsigned leadingIdle = 0, idle = 0, finalIdle = 0;
+            unsigned reads = 0, writes = 0;
             bool addressReady = false;
             std::array<std::uint16_t, 2> extension{};
             std::uint16_t nextOpcode = 0, nextFollowing = 0;
@@ -255,7 +274,8 @@ namespace R2MEGA::Core
             unsigned size = 2, mode = 0, reg = 0, dataReg = 0;
             unsigned quickCount = 0;
             unsigned extensions = 0, immediateWords = 0, fetchesLeft = 0, streamIndex = 2;
-            unsigned leadingIdle = 0, idle = 0, reads = 0, writes = 0;
+            unsigned leadingIdle = 0, idle = 0, finalIdle = 0;
+            unsigned reads = 0, writes = 0;
             bool addressReady = false;
             std::array<std::uint16_t, 4> extension{};
             std::uint16_t nextOpcode = 0, nextFollowing = 0;
@@ -325,21 +345,21 @@ namespace R2MEGA::Core
             enum class Phase
             {
                 Extensions,
-                Idle,
                 Read,
                 Prefetch,
-                Write
+                Write,
+                FinalIdle
             };
             Phase phase = Phase::Extensions;
             unsigned kind = 0, mode = 0, reg = 0, bitReg = 0;
             unsigned extensions = 0, fetchesLeft = 0, streamIndex = 2;
-            unsigned idle = 0, bit = 0;
+            unsigned addressIdle = 0, finalIdle = 0, bit = 0;
             bool staticBit = false, addressReady = false, originalZero = false;
             std::array<std::uint16_t, 3> extension{};
             std::uint16_t nextOpcode = 0, nextFollowing = 0;
             std::uint32_t address = 0, value = 0, result = 0;
         } bitOperation_;
-        // A troca de registradores usa dois ciclos internos antes da pré-busca.
+        // A troca de registradores usa dois ciclos internos após a pré-busca.
         struct RegisterOperation
         {
             unsigned idle = 0;
@@ -349,13 +369,13 @@ namespace R2MEGA::Core
         {
             enum class Phase
             {
-                Extensions,
                 Idle,
+                Extensions,
                 Read,
                 Prefetch,
                 Write
             };
-            Phase phase = Phase::Extensions;
+            Phase phase = Phase::Idle;
             bool memory = false, addressReady = false;
             unsigned idle = 0, count = 0, mode = 0, reg = 0;
             unsigned extensions = 0, fetchesLeft = 0, streamIndex = 2;
@@ -426,7 +446,7 @@ namespace R2MEGA::Core
         {
             bool unlink = false;
             unsigned reg = 0, stage = 0;
-            std::uint32_t oldAddress = 0, base = 0, value = 0;
+            std::uint32_t base = 0, value = 0;
             std::uint16_t nextOpcode = 0;
         } frame_;
         std::uint8_t pendingByte_ = 0;
