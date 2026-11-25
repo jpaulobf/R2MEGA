@@ -36,7 +36,7 @@ namespace R2MEGA::Core
 
     void VDP::clock()
     {
-        if (externalAccessSlot())
+        if ((fifoCount_ != 0 || dmaActive_) && externalAccessSlot())
             clockAccessSlot();
         if (line_ == visibleLines && cycleInLine_ == verticalInterruptCycle)
         {
