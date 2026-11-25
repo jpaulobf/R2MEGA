@@ -35,4 +35,29 @@ namespace R2MEGA::Core
         }
         return result;
     }
+
+    std::optional<Cartridge::Header> Cartridge::header() const
+    {
+        constexpr std::size_t headerSize = 0x100;
+        if (rom_.size() < Header::offset + headerSize ||
+            !std::equal(rom_.begin() + Header::offset, rom_.begin() + Header::offset + 4, "SEGA"))
+            return std::nullopt;
+
+        const auto text = [this](std::size_t offset, std::size_t length)
+        {
+            const auto *first = rom_.data() + offset;
+            std::string field(first, std::find(first, first + length, std::uint8_t(0)));
+            for (auto &character : field)
+                if (character < ' ' || character > '~')
+                    character = '?';
+            const auto start = field.find_first_not_of(' ');
+            if (start == std::string::npos)
+                return std::string{};
+            return field.substr(start, field.find_last_not_of(' ') - start + 1);
+        };
+
+        return Header{text(0x100, 16), text(0x120, 48), text(0x150, 48),
+                      text(0x180, 14), text(0x1f0, 16),
+                      std::uint16_t((std::uint16_t(rom_[0x18e]) << 8) | rom_[0x18f])};
+    }
 }
