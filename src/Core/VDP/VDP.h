@@ -93,6 +93,7 @@ namespace R2MEGA::Core
         void clockDma();
         void clockFifo();
         void finishDma();
+        void queueDataWrite(std::uint16_t value, bool fromDma);
         void writeDataAt(std::uint16_t address, std::uint8_t code, std::uint16_t value);
         std::uint32_t cycleInLine_ = 0;
         std::uint32_t line_ = 0;

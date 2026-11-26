@@ -354,16 +354,18 @@ namespace R2MEGA::Core
         }
         if (fifoCount_ == fifo_.size())
             return false;
-        const auto mode = code_ & 0x0f;
-        if (mode != 1 && mode != 3 && mode != 5)
-            throw std::logic_error("Modo de escrita de dados do VDP ainda não implementado");
-        if (mode == 5 && ((address_ & 0x7e) >> 1) >= VSRAM::size())
-            throw std::logic_error("Endereço de VSRAM fora da área física");
-        fifo_[(fifoHead_ + fifoCount_) % fifo_.size()] = {address_, value, code_, std::uint8_t(mode == 1 ? 2 : 1), false};
-        ++fifoCount_;
-        address_ = std::uint16_t(address_ + registers_[15]);
+        queueDataWrite(value, false);
         commandPending_ = false;
         return true;
+    }
+
+    void VDP::queueDataWrite(std::uint16_t value, bool fromDma)
+    {
+        // CD1 e CD2 definem o custo da FIFO mesmo quando a escrita não tem destino.
+        const auto slots = std::uint8_t((code_ & 0x06) ? 1 : 2);
+        fifo_[(fifoHead_ + fifoCount_) % fifo_.size()] = {address_, value, code_, slots, fromDma};
+        ++fifoCount_;
+        address_ = std::uint16_t(address_ + registers_[15]);
     }
 
     void VDP::writeDataAt(std::uint16_t address, std::uint8_t code, std::uint16_t value)
@@ -383,12 +385,16 @@ namespace R2MEGA::Core
             cram_.write((address >> 1) & 0x3f, value & 0x0eee);
             break;
         case 5:
-            if (((address & 0x7e) >> 1) >= VSRAM::size())
-                throw std::logic_error("Endereço de VSRAM fora da área física");
-            vsram_.write((address & 0x7e) >> 1, value & 0x07ff);
+        {
+            const unsigned index = (address & 0x7e) >> 1;
+            // A escrita usa um slot, mesmo quando o endereço não seleciona uma célula física.
+            if (index < VSRAM::size())
+                vsram_.write(index, value & 0x07ff);
             break;
+        }
         default:
-            throw std::logic_error("Modo de escrita de dados do VDP ainda não implementado");
+            // Códigos sem destino de escrita, incluindo $02 após escrever em um registrador.
+            break;
         }
     }
 
@@ -515,12 +521,8 @@ namespace R2MEGA::Core
     void VDP::queueDmaWord()
     {
         const auto value = dmaReader_(dmaSource_);
-        const auto mode = code_ & 0x0f;
-        fifo_[(fifoHead_ + fifoCount_) % fifo_.size()] =
-            {address_, value, code_, std::uint8_t(mode == 1 ? 2 : 1), true};
-        ++fifoCount_;
+        queueDataWrite(value, true);
         ++dmaQueued_;
-        address_ = std::uint16_t(address_ + registers_[15]);
         dmaSource_ = (dmaSource_ & 0xfe0000u) | ((dmaSource_ + 2) & 0x1ffffu);
         --dmaRemaining_;
         registers_[19] = std::uint8_t(dmaRemaining_);
