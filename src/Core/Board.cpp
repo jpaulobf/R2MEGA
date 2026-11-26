@@ -7,9 +7,17 @@ namespace R2MEGA::Core
 {
     namespace
     {
+        constexpr std::uint32_t cartridgeRomEnd = 0x3fffff;
+
         [[noreturn]] void notImplemented()
         {
             throw std::logic_error("R2MEGA machine emulation is not implemented yet");
+        }
+
+        constexpr std::uint16_t vdpDataByte(std::uint8_t value)
+        {
+            // Uma escrita de byte na porta de dados entrega o mesmo valor nas duas vias.
+            return (std::uint16_t(value) << 8) | value;
         }
     }
 
@@ -123,7 +131,7 @@ namespace R2MEGA::Core
     }
     std::uint8_t Board::readByte(std::uint32_t address)
     {
-        if (address <= 0x3fffff)
+        if (address <= cartridgeRomEnd)
             return cartridge_.rom().at(address);
         if (address >= 0xa10000 && address <= 0xa1001f)
             return controllers_.readByte(address - 0xa10000);
@@ -181,6 +189,13 @@ namespace R2MEGA::Core
 
     void Board::writeByte(std::uint32_t address, std::uint8_t value)
     {
+        if (address <= cartridgeRomEnd)
+            return; // O barramento conclui a escrita sem alterar a ROM.
+        if (address >= 0xc00000 && address <= 0xc00003)
+        {
+            vdp_.writeData(vdpDataByte(value));
+            return;
+        }
         if (address >= 0xa04000 && address <= 0xa04003)
         {
             if (!z80BusGranted())
@@ -237,6 +252,8 @@ namespace R2MEGA::Core
     {
         if (address & 1)
             throw std::invalid_argument("Unaligned 68000 word write");
+        if (address <= cartridgeRomEnd)
+            return;
         if (address == 0xa04000 || address == 0xa04002)
         {
             writeByte(address, std::uint8_t(value >> 8));
@@ -286,6 +303,14 @@ namespace R2MEGA::Core
         notImplemented();
     }
 
+    bool Board::tryWriteByte(std::uint32_t address, std::uint8_t value)
+    {
+        if (address >= 0xc00000 && address <= 0xc00003)
+            return vdp_.tryWriteData(vdpDataByte(value));
+        writeByte(address, value);
+        return true;
+    }
+
     bool Board::tryWriteWord(std::uint32_t address, std::uint16_t value)
     {
         if (address == 0xc00000 || address == 0xc00002)
@@ -302,7 +327,7 @@ namespace R2MEGA::Core
         if (address >= 0x8000)
         {
             const auto mapped = (std::uint32_t(z80Bank_) << 15) | (address & 0x7fff);
-            if (mapped <= 0x3fffff)
+            if (mapped <= cartridgeRomEnd)
                 return cartridge_.rom().at(mapped);
             if (mapped >= 0xe00000)
                 return workRam_.read(mapped & 0xffff);

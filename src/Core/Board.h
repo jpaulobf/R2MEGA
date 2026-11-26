@@ -52,6 +52,7 @@ namespace R2MEGA::Core
         // Acessos do 68000 aos dispositivos atualmente ligados ao barramento.
         std::uint8_t readByte(std::uint32_t address) override;
         std::uint16_t readWord(std::uint32_t address) override;
+        bool tryWriteByte(std::uint32_t address, std::uint8_t value) override;
         bool tryWriteWord(std::uint32_t address, std::uint16_t value) override;
         bool tryAcknowledgeInterrupt(unsigned level, M68KInterruptResponse &response) override;
         void writeByte(std::uint32_t address, std::uint8_t value) override;
