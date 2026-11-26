@@ -334,11 +334,14 @@ namespace R2MEGA::Core
         const bool moveFault = vector == 3 && memoryOp_ == MemoryOp::CombinedMove;
         const bool unlinkFault = vector == 3 && memoryOp_ == MemoryOp::Frame && frame_.unlink;
         const bool shiftFault = vector == 3 && memoryOp_ == MemoryOp::ShiftRotate && shiftRotate_.memory;
+        const bool statusMoveFault = vector == 3 && memoryOp_ == MemoryOp::StatusMove && statusMove_.toSr;
+        const bool returnFetchFault = vector == 3 && returnActive_ && returnStage_ == 3;
         const bool controlFetchFault = vector == 3 && (functionCode & 2) &&
                                        (controlOp_ == ControlOp::Bsr || controlOp_ == ControlOp::Jsr ||
                                         controlOp_ == ControlOp::Jmp || controlOp_ == ControlOp::Rts);
         const bool accurateAddress = vector == 3 &&
-                                     (moveFault || unlinkFault || shiftFault || controlFetchFault ||
+                                     (moveFault || unlinkFault || shiftFault || statusMoveFault ||
+                                      returnFetchFault || controlFetchFault ||
                                       memoryOp_ == MemoryOp::MultiplyDivide ||
                                       memoryOp_ == MemoryOp::Arithmetic ||
                                       memoryOp_ == MemoryOp::TestClearCompare ||
@@ -353,11 +356,13 @@ namespace R2MEGA::Core
         const unsigned mode = memoryOp_ == MemoryOp::MultiplyDivide     ? multiplyDivide_.mode
                               : memoryOp_ == MemoryOp::Arithmetic       ? arithmetic_.mode
                               : memoryOp_ == MemoryOp::TestClearCompare ? testClearCompare_.mode
+                              : statusMoveFault                         ? statusMove_.mode
                               : shiftFault                              ? shiftRotate_.mode
                                                                         : 0;
         const unsigned reg = memoryOp_ == MemoryOp::MultiplyDivide     ? multiplyDivide_.reg
                              : memoryOp_ == MemoryOp::Arithmetic       ? arithmetic_.reg
                              : memoryOp_ == MemoryOp::TestClearCompare ? testClearCompare_.reg
+                             : statusMoveFault                         ? statusMove_.reg
                              : shiftFault                              ? shiftRotate_.reg
                                                                        : 0;
         const unsigned immediatePc = memoryOp_ == MemoryOp::Arithmetic && arithmetic_.immediateInstruction
@@ -380,6 +385,8 @@ namespace R2MEGA::Core
                 savedPc = controlOp_ == ControlOp::Bsr   ? controlTarget_
                           : controlOp_ == ControlOp::Jsr ? controlReturn_
                                                          : state_.pc + 2;
+            else if (returnFetchFault)
+                savedPc += 2;
             else if (memoryOp_ == MemoryOp::ExtendedArithmetic)
                 savedPc += 4;
             else if (memoryOp_ == MemoryOp::Movem)
@@ -594,7 +601,7 @@ namespace R2MEGA::Core
                                           : returnPc_ + (returnStage_ - 3) * 2;
         const unsigned functionCode = returnStage_ < 3 ? (returnCcrOnly_ && !(state_.sr & 0x2000) ? 1u : 5u)
                                                        : (state_.sr & 0x2000 ? 6 : 2);
-        if (transfer(address, false, false, 0, functionCode) != TransferResult::Complete)
+        if (transfer(address, false, false, 0, functionCode, returnStage_ == 3) != TransferResult::Complete)
             return;
         switch (returnStage_)
         {
@@ -611,7 +618,9 @@ namespace R2MEGA::Core
                 state_.sr = (state_.sr & ~std::uint16_t(0x001f)) | (returnSr_ & 0x001f);
             else
                 writeStatusRegister(returnSr_);
-            state_.pc = returnPc_;
+            // A pré-busca ímpar ainda empilha o PC da instrução de retorno mais dois.
+            if (!(returnPc_ & 1))
+                state_.pc = returnPc_;
             break;
         default:
             state_.prefetch[returnStage_ - 3] = pendingWord_;
@@ -1742,7 +1751,8 @@ namespace R2MEGA::Core
                         state_.address[op.sourceReg] -=
                             op.size == 1 && op.sourceReg == 7 ? 2 : op.size;
                     op.sourceAddress = state_.address[op.sourceReg] - (longPredecrement ? 4 : 0);
-                    if (op.compareMemory)
+                    // Em CMPM.L, a primeira leitura ímpar aborta antes do pós-incremento.
+                    if (op.compareMemory && (op.size != 4 || !(op.sourceAddress & 1)))
                         state_.address[op.sourceReg] +=
                             op.size == 1 && op.sourceReg == 7 ? 2 : op.size == 4 ? 2
                                                                                  : op.size;
@@ -2396,6 +2406,12 @@ namespace R2MEGA::Core
             switch (op.phase)
             {
             case StatusMove::Phase::Extensions:
+                if (op.toSr && op.fetchesLeft && op.addressIdle)
+                {
+                    --op.addressIdle;
+                    bus_.observe(pins_);
+                    return;
+                }
                 if (op.fetchesLeft)
                 {
                     if (transfer(state_.pc + op.streamIndex * 2, false, false,
@@ -2446,7 +2462,8 @@ namespace R2MEGA::Core
                              !op.fromSr && op.mode == 7 &&
                                      (op.reg == 2 || op.reg == 3)
                                  ? programCode
-                                 : dataCode) == TransferResult::Complete)
+                                 : dataCode,
+                             op.toSr) == TransferResult::Complete)
                 {
                     if (op.mode == 3)
                         state_.address[op.reg] += 2;
