@@ -432,7 +432,23 @@ namespace
                   fault.word(0x17f8) == 0xb388 && fault.word(0x17fc) == 0x1202,
               "CMPM.L com falha na segunda leitura mantém o destino pendente");
 
-        // A origem de CMPM avança antes da falha; o destino avança após a leitura.
+        Bus oddLongSource;
+        oddLongSource.setup();
+        Moto68000::State initial;
+        initial.pc = 0x108;
+        initial.prefetch = {0xb388, 0x4e71}; // CMPM.L (A0)+,(A1)+.
+        initial.address[0] = 0x1101;
+        initial.address[1] = 0x1200;
+        Moto68000 oddLongCpu(oddLongSource);
+        oddLongCpu.restoreInstructionBoundary(initial, 0, 0x1800);
+        runUntilPc(oddLongCpu, 0x200);
+        check(oddLongCpu.state().cycles == 58 && oddLongCpu.state().instructions == 0 &&
+                  oddLongCpu.state().address[0] == 0x1101 && oddLongCpu.state().address[1] == 0x1200 &&
+                  oddLongSource.word(0x17fe) == 0x10c && oddLongSource.word(0x17f6) == 0x1101 &&
+                  oddLongSource.word(0x17f2) == 0xb395,
+              "CMPM.L com origem ímpar preserva os dois endereços e empilha o quadro do vetor 3");
+
+        // CMPM.W avança a origem antes da falha; o destino avança após a leitura.
         for (const bool oddSource : {true, false})
         {
             Bus odd;
@@ -665,7 +681,17 @@ int main()
         boot(indexedCpu);
         execute(indexedCpu);
         indexed.transfers.clear();
-        check(execute(indexedCpu) == 20 && indexedCpu.state().data[0] == 0 &&
+        for (unsigned cycle = 0; cycle < 20; ++cycle)
+        {
+            indexedCpu.clock();
+            const auto &pins = indexedCpu.pins();
+            if (cycle == 8 || cycle == 12)
+                check(pins.active && !pins.write && pins.functionCode == 6 &&
+                          pins.address == (cycle == 8 ? 0x124u : 0x126u),
+                      "CMP.L relativo ao PC lê as duas palavras no espaço de programa");
+        }
+        check(indexedCpu.atInstructionBoundary() && indexedCpu.state().instructions == 2 &&
+                  indexedCpu.state().data[0] == 0 &&
                   (indexedCpu.state().sr & 0x0f) == 0x09,
               "CMP.L com índice relativo ao PC");
         check(indexed.transfers == std::vector<std::pair<char, std::uint32_t>>({{'R', 0x106}, {'R', 0x124}, {'R', 0x126}, {'R', 0x108}}),

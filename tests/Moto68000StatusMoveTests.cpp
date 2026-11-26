@@ -243,6 +243,56 @@ namespace
             }
     }
 
+    void addressError()
+    {
+        for (const bool indexed : {false, true})
+        {
+            Bus bus;
+            bus.setup();
+            bus.words[12] = 0;
+            bus.words[14] = 0x0200;
+            const std::uint16_t opcode = indexed ? 0x46fb : 0x46d8;
+            Moto68000::State initial;
+            initial.pc = 0x100;
+            initial.prefetch = {opcode, indexed ? std::uint16_t(0x0001) : std::uint16_t(0x4e71)};
+            initial.address[0] = 0x1101;
+            Moto68000 cpu(bus);
+            cpu.restoreInstructionBoundary(initial, 0, 0x1800);
+            if (indexed)
+            {
+                for (unsigned cycle = 0; cycle < 2; ++cycle)
+                {
+                    cpu.clock();
+                    check(!cpu.pins().active, "MOVE para SR calcula o índice antes da pré-busca");
+                }
+                for (unsigned cycle = 0; cycle < 4; ++cycle)
+                    cpu.clock();
+                check(bus.readCodes == std::vector<std::pair<std::uint32_t, unsigned>>{{0x104, 6}},
+                      "MOVE indexado para SR lê a próxima palavra antes do operando");
+            }
+            for (unsigned phase = 0; phase < 4; ++phase)
+            {
+                cpu.clock();
+                const auto &pins = cpu.pins();
+                check(pins.addressError && !pins.addressStrobe && !pins.upperDataStrobe &&
+                          !pins.lowerDataStrobe && pins.phase == phase &&
+                          pins.address == (indexed ? 0x102u : 0x1100u) &&
+                          pins.functionCode == (indexed ? 6u : 5u),
+                      "MOVE para SR sinaliza o endereço ímpar em quatro fases");
+            }
+            runUntilPc(cpu, 0x200);
+            check(cpu.state().cycles == (indexed ? 64u : 58u) &&
+                      cpu.state().address[7] == 0x17f2 && cpu.state().sr == 0x2700 &&
+                      cpu.state().instructions == 0 && cpu.state().address[0] == 0x1101,
+                  "MOVE para SR aborta a leitura ímpar antes do pós-incremento");
+            check(bus.words.at(0x17fe) == 0x102 && bus.words.at(0x17fa) == 0x2700 &&
+                      bus.words.at(0x17f8) == opcode &&
+                      bus.words.at(0x17f6) == (indexed ? 0x0103u : 0x1101u) &&
+                      bus.words.at(0x17f2) == (indexed ? 0x46f6u : 0x46d5u),
+                  "MOVE para SR empilha PC, SR, opcode, endereço e código de função");
+        }
+    }
+
     void privilegeAndUsp()
     {
         Bus bus;
@@ -354,6 +404,7 @@ int main()
     {
         registerAndImmediate();
         memoryModes();
+        addressError();
         privilegeAndUsp();
         pcRelativeAndWriteWait();
     }

@@ -83,10 +83,51 @@ namespace
         check(bus.writes == std::vector<std::uint32_t>({0xffc, 0xffe}),
               "ordem das duas escritas do retorno");
     }
+
+    void oddExceptionReturn()
+    {
+        for (const std::uint16_t opcode : {0x4e73, 0x4e77})
+        {
+            Bus bus;
+            setup(bus);
+            bus.words[0x1000] = 0x8015;
+            bus.words[0x1002] = 0x1234;
+            bus.words[0x1004] = 0x0201;
+            Moto68000::State initial;
+            initial.pc = 0x100;
+            initial.prefetch = {opcode, 0x4e71};
+            Moto68000 cpu(bus);
+            cpu.restoreInstructionBoundary(initial, 0x800, 0x1000);
+            run(cpu, 70);
+
+            const bool rte = opcode == 0x4e73;
+            const unsigned fetchCode = rte ? 2 : 6;
+            check(cpu.atInstructionBoundary() && cpu.state().pc == 0x300 &&
+                      cpu.state().address[7] == 0xff8 && cpu.userStackPointer() == 0x800 &&
+                      cpu.state().sr == (rte ? 0x2015 : 0x2715) && cpu.state().instructions == 0,
+                  "retorno ímpar aplica o status e entra no vetor 3 pelo SSP");
+            check(bus.reads == std::vector<std::uint32_t>{0x1000, 0x1002, 0x1004, 12, 14, 0x300, 0x302} &&
+                      bus.writes == std::vector<std::uint32_t>{0x1004, 0x1000, 0x1002, 0xffe, 0xffc, 0xff8, 0xffa},
+                  "retorno ímpar desempilha, grava o quadro de erro e busca o tratador");
+            check(bus.words.at(0x1004) == 0x102 && bus.words.at(0x1002) == 0 &&
+                      bus.words.at(0x1000) == (rte ? 0x8015 : 0x2715) &&
+                      bus.words.at(0xffe) == opcode && bus.words.at(0xffc) == 0x0201 &&
+                      bus.words.at(0xffa) == 0x1234 && bus.words.at(0xff8) == (0x4e70 | fetchCode),
+                  "retorno ímpar empilha o SR restaurado e o PC seguinte à instrução de retorno");
+            for (unsigned phase = 0; phase < 4; ++phase)
+            {
+                const auto &pins = bus.trace.at(12 + phase);
+                check(pins.addressError && !pins.addressStrobe && pins.phase == phase &&
+                          pins.address == 0x340200 && pins.functionCode == fetchCode,
+                      "retorno ímpar apresenta o destino no espaço de programa restaurado");
+            }
+        }
+    }
 }
 
 int main()
 {
+    oddExceptionReturn();
     Bus byteCall;
     setup(byteCall);
     byteCall.words[0x100] = 0x6104; // BSR.B para $106.
