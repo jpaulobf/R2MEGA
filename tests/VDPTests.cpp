@@ -151,6 +151,25 @@ int main()
     require(fifo->vramByte(6) == 0x11 && fifo->vramByte(7) == 0x03);
     require(fifo->cramWord(0) == 0x00e0);
 
+    auto interruptedWrite = std::make_unique<VDP>();
+    interruptedWrite->writeControl(0x8f02);
+    interruptedWrite->writeControl(0x50b2);
+    interruptedWrite->writeControl(0x0003); // Escrita na VRAM em $D0B2.
+    require(interruptedWrite->tryWriteData(0x869a));
+    interruptedWrite->writeControl(0x8aff); // Escritas de registrador da H-INT.
+    interruptedWrite->writeControl(0x8164); // Código $02 e endereço $C164.
+    require(interruptedWrite->tryWriteData(0x869b));
+    require(interruptedWrite->dataAddress() == 0xc166);
+    while (interruptedWrite->cycleInLine() <= 510)
+        interruptedWrite->clock();
+    require(interruptedWrite->vramByte(0xd0b2) == 0x86 && interruptedWrite->vramByte(0xd0b3) == 0x9a);
+    require((interruptedWrite->readStatus() & 0x0300) == 0);
+    while (interruptedWrite->cycleInLine() <= 810)
+        interruptedWrite->clock();
+    require((interruptedWrite->readStatus() & 0x0300) == 0x0200);
+    require(interruptedWrite->vramByte(0xc164) == 0 && interruptedWrite->vramByte(0xc165) == 0);
+    require(interruptedWrite->cramWord(0x32) == 0);
+
     auto blankFifo = std::make_unique<VDP>();
     blankFifo->reset();
     blankFifo->writeControl(0xc000);
@@ -261,6 +280,20 @@ int main()
     vdp.writeControl(0x0000); // Leitura da VSRAM: código 4.
     vdp.writeControl(0x0010);
     require(vdp.readData() == 0x03ab);
+    vdp.writeControl(0x404e); // Última palavra física da VSRAM.
+    vdp.writeControl(0x0010);
+    require(vdp.tryWriteData(0x0456));
+    require(vdp.tryWriteData(0x07ff) && vdp.dataAddress() == 0x52);
+    vdp.writeControl(0x407e); // Último endereço da janela de 128 bytes.
+    vdp.writeControl(0x0010);
+    require(vdp.tryWriteData(0x07fe));
+    require(vdp.tryWriteData(0x0123) && vdp.dataAddress() == 0x82);
+    require((vdp.readStatus() & 0x0300) == 0x0100);
+    for (unsigned i = 0; i < 128; ++i)
+        vdp.clock();
+    require((vdp.readStatus() & 0x0300) == 0x0200 &&
+            vdp.vsramWord(39) == 0x0456 && vdp.vsramWord(0) == 0x0123 &&
+            vdp.vsramWord(1) == 0);
     vdp.writeControl(0x8140); // Habilita a exibição.
     require(vdp.readStatus() == 0x0200);
     for (unsigned i = 0; i <= 860; ++i)

@@ -287,9 +287,9 @@ namespace
                     expected.emplace_back('R', 0x10a + extensions * 2);
                     if (kind == 1)
                     {
-                        expected.emplace_back(size == 1 ? 'w' : 'W', target);
                         if (size == 4)
                             expected.emplace_back('W', target + 2);
+                        expected.emplace_back(size == 1 ? 'w' : 'W', target);
                     }
                     checkCase(bus.transfers == expected, label + ": ordem do barramento");
                 }
@@ -547,8 +547,9 @@ int main()
         check(execute(clearCpu) == 20 && clear.byte(0x1100) == 0 &&
                   clear.byte(0x1103) == 0 && (clearCpu.state().sr & 0x0f) == 0x04,
               "CLR.L em memória");
-        check(clear.transfers == std::vector<std::pair<char, std::uint32_t>>({{'R', 0x1100}, {'R', 0x1102}, {'R', 0x108}, {'W', 0x1100}, {'W', 0x1102}}),
-              "CLR.L deve ler, pré-buscar e então escrever");
+        check(clear.transfers == std::vector<std::pair<char, std::uint32_t>>(
+                                     {{'R', 0x1100}, {'R', 0x1102}, {'R', 0x108}, {'W', 0x1102}, {'W', 0x1100}}),
+              "CLR.L escreve a palavra baixa antes da alta após a pré-busca");
 
         Bus stack;
         stack.setup(0x1802);
@@ -743,6 +744,21 @@ int main()
                   readFault.word(0x17f8) == 0x4290 &&
                   readFault.word(0x17fc) == 0x1102 && readFault.word(0x17fe) == 0x15,
               "CLR.L com erro na segunda leitura preserva a memória");
+
+        Bus oddClear;
+        oddClear.setup();
+        Moto68000 oddClearCpu(oddClear);
+        Moto68000::State initial{};
+        initial.pc = 0x100;
+        initial.sr = 0x2719;
+        initial.address[0] = 0x1101;
+        initial.prefetch = {0x4298, 0x4e71}; // CLR.L (A0)+.
+        oddClearCpu.restoreInstructionBoundary(initial, 0, 0x1800);
+        runUntilPc(oddClearCpu, 0x200);
+        check(oddClearCpu.state().cycles == 58 && oddClearCpu.state().address[0] == 0x1101 &&
+                  oddClear.word(0x17fa) == initial.sr && oddClear.word(0x17f6) == 0x1101 &&
+                  oddClear.word(0x17fe) == 0x102 && oddClear.word(0x17f2) == 0x4295,
+              "CLR.L em endereço ímpar preserva SR e o registrador de pós-incremento");
 
         Bus writeFault;
         writeFault.setup();

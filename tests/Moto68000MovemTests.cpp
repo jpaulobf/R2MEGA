@@ -12,6 +12,7 @@ namespace
     {
         std::unordered_map<std::uint32_t, std::uint16_t> words;
         std::vector<std::uint32_t> reads, writes;
+        std::vector<M68KPins> trace;
 
         void putLong(std::uint32_t address, std::uint32_t value)
         {
@@ -43,6 +44,7 @@ namespace
             writes.push_back(address);
             words[address] = value;
         }
+        void observe(const M68KPins &pins) override { trace.push_back(pins); }
     };
 
     void check(bool condition, const char *message)
@@ -131,4 +133,56 @@ int main()
               write.words.at(0x11fc) == 0 && write.words.at(0x11fe) == 0x1200 &&
               write.writes == std::vector<std::uint32_t>({0x11fe, 0x11fc, 0x11fa, 0x11f8}),
           "MOVEM.L pré-decrementa e grava a base original na ordem correta");
+
+    Bus indexed;
+    indexed.setup();
+    indexed.words[0x104] = 0x1002;
+    indexed.putLong(0x1104, 0x12345678);
+    indexed.words[0x1108] = 0xabcd;
+    Moto68000 indexedCpu(indexed);
+    Moto68000::State initial{};
+    initial.pc = 0x100;
+    initial.sr = 0x2700;
+    initial.address[0] = 0x1100;
+    initial.data[1] = 2;
+    initial.prefetch = {0x4cf0, 1}; // MOVEM.L (2,A0,D1.W),D0.
+    indexedCpu.restoreInstructionBoundary(initial, 0, 0x1800);
+    check(execute(indexedCpu) == 26 && indexedCpu.state().data[0] == 0x12345678 &&
+              indexed.reads == std::vector<std::uint32_t>({0x104, 0x106, 0x1104, 0x1106, 0x1108, 0x108}),
+          "MOVEM.L indexado carrega a extensão e faz a leitura adicional");
+    check(indexed.trace[3].active && indexed.trace[3].address == 0x104 &&
+              !indexed.trace[4].active && !indexed.trace[5].active &&
+              indexed.trace[6].active && indexed.trace[6].address == 0x106,
+          "MOVEM calcula o índice entre a extensão e a próxima palavra de instrução");
+
+    Bus odd;
+    odd.setup();
+    odd.putLong(12, 0x200);
+    odd.words[0x200] = odd.words[0x202] = 0x4e71;
+    Moto68000 oddCpu(odd);
+    initial.address[0] = 0x1105;
+    initial.prefetch = {0x48e0, 0x8000}; // MOVEM.L D0,-(A0).
+    oddCpu.restoreInstructionBoundary(initial, 0, 0x1800);
+    for (unsigned cycle = 0; cycle < 62; ++cycle)
+        oddCpu.clock();
+    check(oddCpu.atInstructionBoundary() && oddCpu.state().pc == 0x200 &&
+              oddCpu.state().instructions == 0 && oddCpu.state().address[0] == 0x1105 &&
+              odd.words.at(0x17f6) == 0x1103 && odd.words.at(0x17fe) == 0x106,
+          "MOVEM.L com destino ímpar empilha a palavra baixa e preserva a base");
+    for (unsigned phase = 0; phase < 4; ++phase)
+    {
+        const auto &pins = odd.trace.at(4 + phase);
+        check(pins.addressError && pins.write && !pins.addressStrobe &&
+                  pins.address == 0x1102 && pins.phase == phase,
+              "MOVEM apresenta a tentativa de escrita ímpar sem ativar AS");
+    }
+
+    Bus empty;
+    empty.setup();
+    Moto68000 emptyCpu(empty);
+    initial.prefetch = {0x4890, 0}; // MOVEM.W com máscara vazia para (A0).
+    emptyCpu.restoreInstructionBoundary(initial, 0, 0x1800);
+    check(execute(emptyCpu) == 8 && empty.writes.empty() &&
+              empty.reads == std::vector<std::uint32_t>({0x104, 0x106}),
+          "MOVEM com máscara vazia consome apenas os ciclos de pré-busca");
 }

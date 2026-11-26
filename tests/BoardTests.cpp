@@ -26,7 +26,8 @@ int main(int argc, char **argv)
     std::filesystem::create_directories(directory);
     const auto path = directory / "board-reset.bin";
     const std::vector<unsigned char> rom{0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x08,
-                                         0x4e, 0x71, 0x4e, 0x71, 0x4e, 0x71, 0x4e, 0x71};
+                                         0x4e, 0x71, 0x42, 0x54, // NOP; CLR.W (A4), com A4 em zero.
+                                         0x4e, 0x71, 0x4e, 0x71};
     {
         std::ofstream file(path, std::ios::binary);
         file.write(reinterpret_cast<const char *>(rom.data()), rom.size());
@@ -41,6 +42,7 @@ int main(int argc, char **argv)
     require(board.masterCycles() == 14 && board.m68k().state().cycles == 2);
     board.insertCartridge(Cartridge::load(path));
     require(board.masterCycles() == 0 && !board.m68k().resetVectorsLoaded());
+    require(board.tryWriteByte(1, 0x5a));
     require(board.readByte(0) == 0 && board.readWord(0) == 0x00ff);
     require(board.readByte(0xa04000) == 0 && board.readWord(0xa04000) == 0);
     board.writeByte(0xa04000, 0x22);
@@ -69,13 +71,34 @@ int main(int argc, char **argv)
         counterBoard->writeWord(0xc00004, 0x8f02);
         counterBoard->writeWord(0xc00004, 0x4000);
         counterBoard->writeWord(0xc00004, 0);
-        for (unsigned i = 0; i < 4; ++i)
+        for (unsigned i = 0; i < 3; ++i)
             require(counterBoard->tryWriteWord(0xc00000, std::uint16_t(0x2000 + i)));
+        require(counterBoard->tryWriteByte(0xc00003, 0x47));
         require(!counterBoard->tryWriteWord(0xc00000, 0x9999));
+        require(!counterBoard->tryWriteByte(0xc00000, 0x99) && counterBoard->vdp().dataAddress() == 8);
         require((counterBoard->readWord(0xc00004) & 0x0300) == 0x0100);
-        while ((counterBoard->readWord(0xc00004) & 0x0100) != 0)
+        for (unsigned i = 0; i < 512 && (counterBoard->readWord(0xc00004) & 0x0100); ++i)
             counterBoard->clock();
-        require(counterBoard->tryWriteWord(0xc00000, 0x2004));
+        require(counterBoard->tryWriteByte(0xc00000, 0x53));
+        for (unsigned i = 0; i < 512 && !(counterBoard->readWord(0xc00004) & 0x0200); ++i)
+            counterBoard->clock();
+        require(counterBoard->readWord(0xc00004) & 0x0200);
+        require(counterBoard->vdp().vramByte(6) == 0x47 && counterBoard->vdp().vramByte(7) == 0x47);
+        require(counterBoard->vdp().vramByte(8) == 0x53 && counterBoard->vdp().vramByte(9) == 0x53);
+        counterBoard->writeByte(0xc00002, 0x66);
+        require(counterBoard->vdp().vramByte(10) == 0x66 && counterBoard->vdp().vramByte(11) == 0x66);
+
+        counterBoard->writeWord(0xc00004, 0x8110); // Habilita DMA.
+        counterBoard->writeWord(0xc00004, 0x8f01); // Incremento de um byte.
+        counterBoard->writeWord(0xc00004, 0x9304);
+        counterBoard->writeWord(0xc00004, 0x9400);
+        counterBoard->writeWord(0xc00004, 0x9780); // DMA Fill.
+        counterBoard->writeWord(0xc00004, 0x4100);
+        counterBoard->writeWord(0xc00004, 0x0080);
+        require(counterBoard->tryWriteByte(0xc00000, 0x5a) && counterBoard->vdp().dmaActive());
+        for (unsigned i = 0; i < 512 && counterBoard->vdp().dmaActive(); ++i)
+            counterBoard->clock();
+        require(!counterBoard->vdp().dmaActive() && counterBoard->vdp().vramByte(0x104) == 0x5a);
     }
     {
         auto interruptBoard = std::make_unique<Board>();
@@ -117,6 +140,11 @@ int main(int argc, char **argv)
     for (unsigned i = 0; i < 28; ++i)
         board.clock();
     require(board.m68k().state().pc == 10 && board.m68k().state().instructions == 1);
+
+    for (unsigned i = 0; i < 12 * Scheduler::M68KDivider; ++i)
+        board.clock();
+    require(board.m68k().state().pc == 12 && board.m68k().state().instructions == 2);
+    require(board.readWord(0) == 0x00ff && board.m68k().lastException().serial == 0);
 
     board.writeWord(0xff0000, 0x1234);
     require(board.readByte(0xe00000) == 0x12 && board.readByte(0xffffff) == 0);

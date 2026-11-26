@@ -314,13 +314,16 @@ namespace
         execute(longCpu);
         execute(longCpu);
         longBus.transfers.clear();
-        check(execute(longCpu) == 30 && longCpu.state().address[0] == 0x1100 &&
+        longBus.waitAddress = 0x1202;
+        longBus.writeWait = 2;
+        check(execute(longCpu) == 32 && longCpu.state().address[0] == 0x1100 &&
                   longCpu.state().address[1] == 0x1200 &&
                   longBus.word(0x1200) == 0xffff && longBus.word(0x1202) == 0xffff &&
                   (longCpu.state().sr & 0x1f) == 0x19,
-              "SUBX.L memória para memória consome 30 ciclos");
-        check(longBus.transfers == std::vector<std::pair<char, std::uint32_t>>({{'R', 0x1100}, {'R', 0x1102}, {'R', 0x1200}, {'R', 0x1202}, {'R', 0x10e}, {'W', 0x1200}, {'W', 0x1202}}),
-              "SUBX.L usa cinco leituras e duas escritas");
+              "SUBX.L memória para memória consome 30 ciclos mais duas esperas");
+        check(longBus.transfers == std::vector<std::pair<char, std::uint32_t>>(
+                                       {{'R', 0x1102}, {'R', 0x1100}, {'R', 0x1202}, {'R', 0x1200}, {'W', 0x1202}, {'R', 0x10e}, {'W', 0x1200}}),
+              "SUBX.L lê a palavra baixa primeiro e faz a pré-busca entre as escritas");
 
         Bus same;
         same.setup();
@@ -440,9 +443,35 @@ namespace
         check(oddCpu.state().instructions == 2 &&
                   oddCpu.state().address[0] == 0x1101 &&
                   oddCpu.state().address[1] == 0x1202 &&
-                  odd.word(0x17f8) == 0x9348 && odd.word(0x17fc) == 0x1101 &&
-                  odd.word(0x17fe) == 0x15,
+                  odd.word(0x17f8) == 0x9348 && odd.word(0x17f6) == 0x1101 &&
+                  odd.word(0x17fe) == 0x10c && odd.word(0x17f2) == 0x9355,
               "SUBX.W desalinhado falha na leitura da origem");
+
+        for (bool sourceOdd : {false, true})
+        {
+            Bus bus;
+            bus.setup();
+            bus.putWord(0x1100, 0x1234);
+            bus.putWord(0x1102, 0x5678);
+            Moto68000 cpu(bus);
+            Moto68000::State initial{};
+            initial.sr = 0x2714;
+            initial.pc = 0x100;
+            initial.prefetch = {0xd388, 0x4e71}; // ADDX.L -(A0),-(A1).
+            initial.address[0] = sourceOdd ? 0x1105 : 0x1104;
+            initial.address[1] = sourceOdd ? 0x1204 : 0x1205;
+            cpu.restoreInstructionBoundary(initial, 0, 0x1800);
+            runUntilPc(cpu, 0x200);
+            check(cpu.state().cycles == (sourceOdd ? 60u : 68u) &&
+                      cpu.state().instructions == 0 &&
+                      cpu.state().address[0] == (sourceOdd ? 0x1105u : 0x1100u) &&
+                      cpu.state().address[1] == initial.address[1],
+                  "ADDX.L só atualiza a base de uma leitura long concluída");
+            check(bus.word(0x17f2) == 0xd395 && bus.word(0x17f6) == (sourceOdd ? 0x1103 : 0x1203) &&
+                      bus.word(0x17f8) == 0xd388 && bus.word(0x17fa) == initial.sr &&
+                      bus.word(0x17fe) == 0x104,
+                  "ADDX.L empilha o endereço ímpar da palavra baixa e preserva o SR");
+        }
 
         Bus writeFault;
         writeFault.setup();
