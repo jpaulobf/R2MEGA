@@ -344,7 +344,8 @@ namespace R2MEGA::Core
                                       memoryOp_ == MemoryOp::TestClearCompare ||
                                       memoryOp_ == MemoryOp::Movem ||
                                       (memoryOp_ == MemoryOp::ExtendedArithmetic &&
-                                       extendedArithmetic_.compareMemory));
+                                       (extendedArithmetic_.compareMemory ||
+                                        (extendedArithmetic_.memory && extendedArithmetic_.size > 1))));
         const bool processingException = exceptionActive_ && !exceptionInstructionContext_;
         std::uint16_t faultIr = returnActive_ ? returnIr_ : controlOp_ != ControlOp::None ? controlIr_
                                                                                           : state_.prefetch[0];
@@ -367,7 +368,8 @@ namespace R2MEGA::Core
                                  !arithmetic_.addressDestination) ||
                                 (memoryOp_ == MemoryOp::TestClearCompare &&
                                  testClearCompare_.size == 4 &&
-                                 testClearCompare_.kind != TestClearCompare::Kind::CompareAddress);
+                                 (testClearCompare_.kind == TestClearCompare::Kind::Test ||
+                                  testClearCompare_.kind == TestClearCompare::Kind::Compare));
         const bool longPredecrement = (memoryOp_ == MemoryOp::Arithmetic && arithmetic_.size == 4) ||
                                       (memoryOp_ == MemoryOp::TestClearCompare && testClearCompare_.size == 4);
         std::uint32_t savedPc = state_.pc;
@@ -1109,7 +1111,7 @@ namespace R2MEGA::Core
                 if (transfer(op.address + (op.size == 4 ? op.reads * 2 : 0),
                              op.size == 1, false, 0,
                              op.mode == 7 && (op.reg == 2 || op.reg == 3) ? programCode : dataCode,
-                             compareAddress) == TransferResult::Complete)
+                             compareAddress || clear) == TransferResult::Complete)
                 {
                     const std::uint32_t part = op.size == 1 ? pendingByte_ : pendingWord_;
                     op.value = op.size == 4 && op.reads == 0 ? part << 16 : op.value | part;
@@ -1150,7 +1152,7 @@ namespace R2MEGA::Core
 
             case TestClearCompare::Phase::Write:
                 pins_.readModifyWrite = tasMemory;
-                if (transfer(op.address + (op.size == 4 ? op.writes * 2 : 0),
+                if (transfer(op.address + (op.size == 4 ? (1 - op.writes) * 2 : 0),
                              op.size == 1, true,
                              tasMemory ? std::uint16_t(op.value | 0x80) : 0,
                              dataCode) == TransferResult::Complete &&
@@ -1653,6 +1655,8 @@ namespace R2MEGA::Core
         const unsigned dataCode = state_.sr & 0x2000 ? 5 : 1;
         const unsigned programCode = state_.sr & 0x2000 ? 6 : 2;
         const unsigned words = op.size == 4 ? 2 : 1;
+        const bool longPredecrement = op.memory && op.size == 4 && !op.compareMemory;
+        const bool checkAlignment = !op.compareMemory && op.size > 1;
 
         const auto calculate = [&]()
         {
@@ -1726,6 +1730,7 @@ namespace R2MEGA::Core
                 continue;
 
             case ExtendedArithmetic::Phase::SourceRead:
+            {
                 if (!op.memory)
                 {
                     op.source = state_.data[op.sourceReg];
@@ -1736,54 +1741,64 @@ namespace R2MEGA::Core
                 }
                 if (!op.sourceAddressReady)
                 {
-                    if (!op.compareMemory)
+                    if (!op.compareMemory && !longPredecrement)
                         state_.address[op.sourceReg] -=
                             op.size == 1 && op.sourceReg == 7 ? 2 : op.size;
-                    op.sourceAddress = state_.address[op.sourceReg];
+                    op.sourceAddress = state_.address[op.sourceReg] - (longPredecrement ? 4 : 0);
                     if (op.compareMemory)
                         state_.address[op.sourceReg] +=
                             op.size == 1 && op.sourceReg == 7 ? 2 : op.size == 4 ? 2
                                                                                  : op.size;
                     op.sourceAddressReady = true;
                 }
-                if (transfer(op.sourceAddress + (op.size == 4 ? op.sourceReads * 2 : 0),
-                             op.size == 1, false, 0, dataCode) == TransferResult::Complete)
+                const unsigned word = longPredecrement ? 1 - op.sourceReads : op.sourceReads;
+                if (transfer(op.sourceAddress + word * 2,
+                             op.size == 1, false, 0, dataCode, checkAlignment) == TransferResult::Complete)
                 {
                     const std::uint32_t part = op.size == 1 ? pendingByte_ : pendingWord_;
-                    op.source = op.size == 4 && op.sourceReads == 0 ? part << 16 : op.source | part;
+                    op.source |= op.size == 4 && word == 0 ? part << 16 : part;
                     if (op.compareMemory && op.size == 4 && op.sourceReads == 0)
                         state_.address[op.sourceReg] += 2;
                     if (++op.sourceReads == words)
                     {
+                        if (longPredecrement)
+                            state_.address[op.sourceReg] = op.sourceAddress;
                         op.phase = ExtendedArithmetic::Phase::TargetRead;
                     }
                 }
                 return;
+            }
 
             case ExtendedArithmetic::Phase::TargetRead:
+            {
                 if (!op.targetAddressReady)
                 {
-                    if (!op.compareMemory)
+                    if (!op.compareMemory && !longPredecrement)
                         state_.address[op.targetReg] -=
                             op.size == 1 && op.targetReg == 7 ? 2 : op.size;
-                    op.targetAddress = state_.address[op.targetReg];
+                    op.targetAddress = state_.address[op.targetReg] - (longPredecrement ? 4 : 0);
                     op.targetAddressReady = true;
                 }
-                if (transfer(op.targetAddress + (op.size == 4 ? op.targetReads * 2 : 0),
-                             op.size == 1, false, 0, dataCode) == TransferResult::Complete)
+                const unsigned word = longPredecrement ? 1 - op.targetReads : op.targetReads;
+                if (transfer(op.targetAddress + word * 2,
+                             op.size == 1, false, 0, dataCode, checkAlignment) == TransferResult::Complete)
                 {
                     const std::uint32_t part = op.size == 1 ? pendingByte_ : pendingWord_;
-                    op.target = op.size == 4 && op.targetReads == 0 ? part << 16 : op.target | part;
+                    op.target |= op.size == 4 && word == 0 ? part << 16 : part;
                     if (++op.targetReads == words)
                     {
                         if (op.compareMemory)
                             state_.address[op.targetReg] +=
                                 op.size == 1 && op.targetReg == 7 ? 2 : op.size;
+                        else if (longPredecrement)
+                            state_.address[op.targetReg] = op.targetAddress;
                         calculate();
-                        op.phase = ExtendedArithmetic::Phase::Prefetch;
+                        op.phase = longPredecrement ? ExtendedArithmetic::Phase::Write
+                                                    : ExtendedArithmetic::Phase::Prefetch;
                     }
                 }
                 return;
+            }
 
             case ExtendedArithmetic::Phase::Prefetch:
                 if (transfer(state_.pc + 4, false, false, 0, programCode) != TransferResult::Complete)
@@ -1791,9 +1806,9 @@ namespace R2MEGA::Core
                 op.nextFollowing = pendingWord_;
                 if (op.memory && !op.compareMemory)
                     op.phase = ExtendedArithmetic::Phase::Write;
-                else if (op.decimal && op.subtract)
+                else if (!op.memory && (op.size == 4 || (op.decimal && op.subtract)))
                 {
-                    op.idle = 2;
+                    op.idle = op.size == 4 ? 4 : 2;
                     op.phase = ExtendedArithmetic::Phase::FinalIdle;
                 }
                 else
@@ -1808,11 +1823,18 @@ namespace R2MEGA::Core
 
             case ExtendedArithmetic::Phase::Write:
             {
-                const std::uint16_t value = op.size == 4 ? static_cast<std::uint16_t>(op.writes == 0 ? op.result >> 16 : op.result) : static_cast<std::uint16_t>(op.result);
-                if (transfer(op.targetAddress + (op.size == 4 ? op.writes * 2 : 0),
-                             op.size == 1, true, value, dataCode) == TransferResult::Complete &&
-                    ++op.writes == words)
-                    finish();
+                // Em long, a pré-busca ocorre entre a escrita da palavra baixa e a da alta.
+                const bool lowWord = longPredecrement && op.writes == 0;
+                const auto value = static_cast<std::uint16_t>(
+                    longPredecrement && !lowWord ? op.result >> 16 : op.result);
+                if (transfer(op.targetAddress + (lowWord ? 2 : 0),
+                             op.size == 1, true, value, dataCode) == TransferResult::Complete)
+                {
+                    if (++op.writes == words)
+                        finish();
+                    else
+                        op.phase = ExtendedArithmetic::Phase::Prefetch;
+                }
                 return;
             }
             }
@@ -2236,6 +2258,16 @@ namespace R2MEGA::Core
                     op.extension[op.extensionReads++] = pendingWord_;
                 return;
             }
+            op.phase = Movem::Phase::Idle;
+            [[fallthrough]];
+
+        case Movem::Phase::Idle:
+            if (op.idle)
+            {
+                --op.idle;
+                bus_.observe(pins_);
+                return;
+            }
             op.address = moveMemoryAddress(op.mode, op.reg, state_.address,
                                            state_.data, op.extension[0],
                                            op.extension[1], state_.pc + 4);
@@ -2247,24 +2279,11 @@ namespace R2MEGA::Core
                          0, programCode) == TransferResult::Complete)
             {
                 op.nextOpcode = pendingWord_;
-                op.phase = Movem::Phase::Idle;
+                op.phase = !op.write ? Movem::Phase::Read
+                           : op.mask ? Movem::Phase::Write
+                                     : Movem::Phase::FollowingFetch;
             }
             return;
-
-        case Movem::Phase::Idle:
-            if (op.idle)
-            {
-                --op.idle;
-                bus_.observe(pins_);
-                return;
-            }
-            op.phase = op.write ? Movem::Phase::Write : Movem::Phase::Read;
-            if (op.write)
-            {
-                clockMovem();
-                return;
-            }
-            [[fallthrough]];
 
         case Movem::Phase::Read:
         {
@@ -2273,12 +2292,12 @@ namespace R2MEGA::Core
             if (op.registerIndex == 16)
             {
                 op.phase = Movem::Phase::TrailingRead;
-                if (transfer(op.address, false, false, 0, operandCode) == TransferResult::Complete)
+                if (transfer(op.address, false, false, 0, operandCode, true) == TransferResult::Complete)
                     op.phase = Movem::Phase::FollowingFetch;
                 return;
             }
             if (transfer(op.address + op.word * 2, false, false,
-                         0, operandCode) != TransferResult::Complete)
+                         0, operandCode, true) != TransferResult::Complete)
                 return;
             if (op.size == 4 && op.word == 0)
             {
@@ -2305,11 +2324,6 @@ namespace R2MEGA::Core
         {
             while (op.registerIndex < 16 && !(op.mask & (1u << op.registerIndex)))
                 ++op.registerIndex;
-            if (op.registerIndex == 16)
-            {
-                op.phase = Movem::Phase::FollowingFetch;
-                return;
-            }
             const unsigned registerNumber = op.mode == 4 ? 15 - op.registerIndex
                                                          : op.registerIndex;
             if (!op.writeAddressReady)
@@ -2326,7 +2340,7 @@ namespace R2MEGA::Core
             const std::uint16_t value = static_cast<std::uint16_t>(
                 lowWord ? op.value : op.value >> 16);
             const std::uint32_t address = op.mode == 4 ? op.address - 2 : op.address;
-            if (transfer(address, false, true, value, dataCode) != TransferResult::Complete)
+            if (transfer(address, false, true, value, dataCode, true) != TransferResult::Complete)
                 return;
             if (op.mode == 4)
             {
@@ -2348,7 +2362,7 @@ namespace R2MEGA::Core
         }
 
         case Movem::Phase::TrailingRead:
-            if (transfer(op.address, false, false, 0, operandCode) == TransferResult::Complete)
+            if (transfer(op.address, false, false, 0, operandCode, true) == TransferResult::Complete)
                 op.phase = Movem::Phase::FollowingFetch;
             return;
 
@@ -3345,7 +3359,7 @@ namespace R2MEGA::Core
                 op.fetchesLeft = op.extensions;
                 const bool indexed = mode == 6 || (mode == 7 && reg == 3);
                 op.idle = mode == 4 || indexed ? 2 : 0;
-                if (indexed && (testSet || compareAddress))
+                if (indexed && (testSet || compareAddress || op.kind == TestClearCompare::Kind::Clear))
                 {
                     op.leadingIdle = op.idle;
                     op.idle = 0;
@@ -3356,7 +3370,7 @@ namespace R2MEGA::Core
                     op.idle += 2;
                 else if (op.kind == TestClearCompare::Kind::Clear && mode == 0 &&
                          op.size == 4)
-                    op.idle += 2;
+                    op.finalIdle = 2;
                 if (op.extensions)
                     op.extension[0] = state_.prefetch[1];
                 else
@@ -3758,8 +3772,7 @@ namespace R2MEGA::Core
                                                             : 4;
                 op.sourceReg = opcode & 7;
                 op.targetReg = (opcode >> 9) & 7;
-                op.idle = op.memory ? 2 : op.size == 4 ? 4
-                                                       : 0;
+                op.idle = op.memory ? 2 : 0;
                 op.nextOpcode = state_.prefetch[1];
                 memoryOp_ = MemoryOp::ExtendedArithmetic;
                 clockExtendedArithmetic();

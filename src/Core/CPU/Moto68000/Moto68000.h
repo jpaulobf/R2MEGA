@@ -405,8 +405,8 @@ namespace R2MEGA::Core
             enum class Phase
             {
                 Extensions,
-                NextOpcode,
                 Idle,
+                NextOpcode,
                 Read,
                 Write,
                 TrailingRead,
