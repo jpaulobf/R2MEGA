@@ -368,8 +368,7 @@ namespace R2MEGA::Core
                                  !arithmetic_.addressDestination) ||
                                 (memoryOp_ == MemoryOp::TestClearCompare &&
                                  testClearCompare_.size == 4 &&
-                                 (testClearCompare_.kind == TestClearCompare::Kind::Test ||
-                                  testClearCompare_.kind == TestClearCompare::Kind::Compare));
+                                 testClearCompare_.kind == TestClearCompare::Kind::Test);
         const bool longPredecrement = (memoryOp_ == MemoryOp::Arithmetic && arithmetic_.size == 4) ||
                                       (memoryOp_ == MemoryOp::TestClearCompare && testClearCompare_.size == 4);
         std::uint32_t savedPc = state_.pc;
@@ -576,6 +575,18 @@ namespace R2MEGA::Core
         interruptAcknowledged_ = true;
     }
 
+    void Moto68000::writeStatusRegister(std::uint16_t value)
+    {
+        // T, S, I2–I0 e XNZVC são os bits implementados no MC68000.
+        constexpr std::uint16_t implementedBits = 0xa71f;
+        if ((state_.sr & 0x2000) && !(value & 0x2000))
+        {
+            ssp_ = state_.address[7];
+            state_.address[7] = usp_;
+        }
+        state_.sr = value & implementedBits;
+    }
+
     void Moto68000::clockReturn()
     {
         const std::uint32_t address = returnStage_ < 3
@@ -595,25 +606,12 @@ namespace R2MEGA::Core
             break;
         case 2:
             returnPc_ |= pendingWord_;
-            {
-                const auto nextSsp = state_.address[7] + 6;
-                if (returnCcrOnly_)
-                {
-                    state_.address[7] = nextSsp;
-                    state_.sr = (state_.sr & ~std::uint16_t(0x001f)) |
-                                (returnSr_ & 0x001f);
-                }
-                else if (!(returnSr_ & 0x2000))
-                {
-                    ssp_ = nextSsp;
-                    state_.address[7] = usp_;
-                }
-                else
-                    state_.address[7] = nextSsp;
-                if (!returnCcrOnly_)
-                    state_.sr = returnSr_;
-                state_.pc = returnPc_;
-            }
+            state_.address[7] += 6;
+            if (returnCcrOnly_)
+                state_.sr = (state_.sr & ~std::uint16_t(0x001f)) | (returnSr_ & 0x001f);
+            else
+                writeStatusRegister(returnSr_);
+            state_.pc = returnPc_;
             break;
         default:
             state_.prefetch[returnStage_ - 3] = pendingWord_;
@@ -776,13 +774,7 @@ namespace R2MEGA::Core
             if (!stop || controlIdle_)
                 return;
 
-            const std::uint16_t status = state_.prefetch[1] & 0xa71f;
-            if (!(status & 0x2000))
-            {
-                ssp_ = state_.address[7];
-                state_.address[7] = usp_;
-            }
-            state_.sr = status;
+            writeStatusRegister(state_.prefetch[1]);
             state_.pc += 4;
             stopped_ = true;
         }
@@ -1001,6 +993,8 @@ namespace R2MEGA::Core
         const bool clear = op.kind == TestClearCompare::Kind::Clear;
         const bool tasMemory = op.kind == TestClearCompare::Kind::TestSet && op.mode != 0;
         const bool compareAddress = op.kind == TestClearCompare::Kind::CompareAddress;
+        const bool clockAddressError = compareAddress || clear ||
+                                       (op.kind == TestClearCompare::Kind::Compare && op.size == 4);
 
         const auto finish = [&]()
         {
@@ -1111,7 +1105,7 @@ namespace R2MEGA::Core
                 if (transfer(op.address + (op.size == 4 ? op.reads * 2 : 0),
                              op.size == 1, false, 0,
                              op.mode == 7 && (op.reg == 2 || op.reg == 3) ? programCode : dataCode,
-                             compareAddress || clear) == TransferResult::Complete)
+                             clockAddressError) == TransferResult::Complete)
                 {
                     const std::uint32_t part = op.size == 1 ? pendingByte_ : pendingWord_;
                     op.value = op.size == 4 && op.reads == 0 ? part << 16 : op.value | part;
@@ -1182,6 +1176,8 @@ namespace R2MEGA::Core
         const unsigned programCode = supervisor ? 6 : 2;
         const unsigned words = op.size == 4 ? 2 : 1;
         const unsigned step = op.size == 1 && op.reg == 7 ? 2 : op.size;
+        const bool clockAddressError = op.checkBounds || (op.addressDestination && !op.quickInstruction) ||
+                                       (op.compareOnly && op.immediateInstruction && op.size == 4);
 
         const auto calculate = [&]()
         {
@@ -1292,7 +1288,8 @@ namespace R2MEGA::Core
             switch (op.phase)
             {
             case Arithmetic::Phase::Extensions:
-                if (op.leadingIdle)
+                // Em CMPI.L indexado, as palavras imediatas precedem o cálculo do índice.
+                if (op.leadingIdle && op.streamIndex > op.immediateWords + 1)
                 {
                     --op.leadingIdle;
                     bus_.observe(pins_);
@@ -1358,7 +1355,7 @@ namespace R2MEGA::Core
                                      (op.reg == 2 || op.reg == 3)
                                  ? programCode
                                  : dataCode,
-                             op.checkBounds || (op.addressDestination && !op.quickInstruction)) == TransferResult::Complete)
+                             clockAddressError) == TransferResult::Complete)
                 {
                     const std::uint32_t part = op.size == 1 ? pendingByte_ : pendingWord_;
                     op.operand = op.size == 4 && op.reads == 0 ? part << 16 : op.operand | part;
@@ -1656,7 +1653,7 @@ namespace R2MEGA::Core
         const unsigned programCode = state_.sr & 0x2000 ? 6 : 2;
         const unsigned words = op.size == 4 ? 2 : 1;
         const bool longPredecrement = op.memory && op.size == 4 && !op.compareMemory;
-        const bool checkAlignment = !op.compareMemory && op.size > 1;
+        const bool clockAddressError = op.size == 4 || (op.size == 2 && !op.compareMemory);
 
         const auto calculate = [&]()
         {
@@ -1753,7 +1750,7 @@ namespace R2MEGA::Core
                 }
                 const unsigned word = longPredecrement ? 1 - op.sourceReads : op.sourceReads;
                 if (transfer(op.sourceAddress + word * 2,
-                             op.size == 1, false, 0, dataCode, checkAlignment) == TransferResult::Complete)
+                             op.size == 1, false, 0, dataCode, clockAddressError) == TransferResult::Complete)
                 {
                     const std::uint32_t part = op.size == 1 ? pendingByte_ : pendingWord_;
                     op.source |= op.size == 4 && word == 0 ? part << 16 : part;
@@ -1781,7 +1778,7 @@ namespace R2MEGA::Core
                 }
                 const unsigned word = longPredecrement ? 1 - op.targetReads : op.targetReads;
                 if (transfer(op.targetAddress + word * 2,
-                             op.size == 1, false, 0, dataCode, checkAlignment) == TransferResult::Complete)
+                             op.size == 1, false, 0, dataCode, clockAddressError) == TransferResult::Complete)
                 {
                     const std::uint32_t part = op.size == 1 ? pendingByte_ : pendingWord_;
                     op.target |= op.size == 4 && word == 0 ? part << 16 : part;
@@ -1856,19 +1853,14 @@ namespace R2MEGA::Core
             --op.idle;
             if (op.idle == 0)
             {
-                const bool fullStatus = (op.opcode & 0x0040) != 0;
-                const std::uint16_t mask = fullStatus ? 0xffff : 0x001f;
-                const std::uint16_t source = op.immediate & mask;
+                const std::uint16_t source = op.immediate;
                 const std::uint16_t previous = state_.sr;
                 const std::uint16_t result = (op.opcode & 0xff00) == 0x0000 ? previous | source : (op.opcode & 0xff00) == 0x0200 ? previous & source
                                                                                                                                  : previous ^ source;
-                const std::uint16_t next = (previous & ~mask) | (result & mask);
-                if (fullStatus && (previous & 0x2000) && !(next & 0x2000))
-                {
-                    ssp_ = state_.address[7];
-                    state_.address[7] = usp_;
-                }
-                state_.sr = next;
+                if (op.opcode & 0x0040)
+                    writeStatusRegister(result);
+                else
+                    state_.sr = (previous & ~std::uint16_t(0x001f)) | (result & 0x001f);
                 op.phase = StatusImmediate::Phase::OpcodeFetch;
             }
             bus_.observe(pins_);
@@ -2470,16 +2462,7 @@ namespace R2MEGA::Core
                     if (op.idle == 0 && !op.fromSr)
                     {
                         if (op.toSr)
-                        {
-                            const bool switchToUser = (state_.sr & 0x2000) &&
-                                                      !(op.value & 0x2000);
-                            if (switchToUser)
-                            {
-                                ssp_ = state_.address[7];
-                                state_.address[7] = usp_;
-                            }
-                            state_.sr = op.value;
-                        }
+                            writeStatusRegister(op.value);
                         else
                             state_.sr = (state_.sr & ~std::uint16_t(0x1f)) |
                                         (op.value & 0x1f);
@@ -3359,17 +3342,14 @@ namespace R2MEGA::Core
                 op.fetchesLeft = op.extensions;
                 const bool indexed = mode == 6 || (mode == 7 && reg == 3);
                 op.idle = mode == 4 || indexed ? 2 : 0;
-                if (indexed && (testSet || compareAddress || op.kind == TestClearCompare::Kind::Clear))
+                const bool longCompare = compare && op.size == 4;
+                if (indexed && (testSet || compareAddress || longCompare || op.kind == TestClearCompare::Kind::Clear))
                 {
                     op.leadingIdle = op.idle;
                     op.idle = 0;
                 }
-                if (compareAddress)
-                    op.finalIdle = 2;
-                else if (compare && op.size == 4)
-                    op.idle += 2;
-                else if (op.kind == TestClearCompare::Kind::Clear && mode == 0 &&
-                         op.size == 4)
+                if (compareAddress || longCompare ||
+                    (op.kind == TestClearCompare::Kind::Clear && mode == 0 && op.size == 4))
                     op.finalIdle = 2;
                 if (op.extensions)
                     op.extension[0] = state_.prefetch[1];
@@ -3615,8 +3595,16 @@ namespace R2MEGA::Core
                 op.fetchesLeft = op.extensions;
                 op.extension[0] = state_.prefetch[1];
                 op.idle = op.mode == 4 || op.mode == 6 ? 2 : 0;
-                if (!op.memoryDestination && op.size == 4)
-                    op.idle += 2;
+                if (op.size == 4)
+                {
+                    if (op.mode == 6)
+                    {
+                        op.leadingIdle = op.idle;
+                        op.idle = 0;
+                    }
+                    if (!op.memoryDestination)
+                        op.finalIdle = 2;
+                }
                 clockArithmetic();
                 return;
             }

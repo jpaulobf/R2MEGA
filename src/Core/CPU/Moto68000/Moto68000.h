@@ -73,6 +73,7 @@ namespace R2MEGA::Core
         void clockException();
         void clockInterruptAcknowledge();
         void clockReturn();
+        void writeStatusRegister(std::uint16_t value);
         void clockControl();
         void clockPea();
         bool pushLongWord(std::uint32_t value, bool lowWord);
