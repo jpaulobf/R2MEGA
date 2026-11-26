@@ -110,9 +110,9 @@ namespace
             {0x003c, 0x00a2, 0x2717}, // ORI em CCR ignora os bits reservados.
             {0x023c, 0xfff8, 0x2710}, // ANDI em CCR preserva o byte superior.
             {0x0a3c, 0xff07, 0x2712}, // EORI em CCR ignora o byte alto.
-            {0x007c, 0x8002, 0xa717}, // ORI em SR altera T e V.
+            {0x007c, 0xd8e2, 0xa717}, // ORI em SR altera T e V e ignora os bits reservados.
             {0x027c, 0x20ff, 0x2015}, // ANDI em SR limpa a máscara de interrupção.
-            {0x0a7c, 0x0704, 0x2011}  // EORI em SR altera máscara e Z.
+            {0x0a7c, 0x5fe4, 0x2011}  // EORI em SR altera máscara e Z e ignora os bits reservados.
         }};
         for (const auto &test : cases)
         {
@@ -149,7 +149,7 @@ namespace
     void userTransitionAndPrivilege()
     {
         constexpr std::array<std::pair<std::uint16_t, std::uint16_t>, 2> transitions{{
-            {0x0a7c, 0x2000}, // EORI remove S.
+            {0x0a7c, 0x78e0}, // EORI remove S e ignora os bits reservados.
             {0x027c, 0xdfff}  // ANDI remove S.
         }};
         for (const auto [transition, mask] : transitions)

@@ -465,6 +465,16 @@ namespace
         Moto68000 oddImmediateCpu(oddImmediate);
         boot(oddImmediateCpu);
         execute(oddImmediateCpu);
+        for (unsigned cycle = 0; cycle < 10; ++cycle)
+            oddImmediateCpu.clock();
+        for (unsigned phase = 0; phase < 4; ++phase)
+        {
+            oddImmediateCpu.clock();
+            const auto &pins = oddImmediateCpu.pins();
+            check(pins.addressError && !pins.addressStrobe && pins.phase == phase &&
+                      pins.address == 0x1100 && pins.functionCode == 5,
+                  "CMPI.L desalinhado apresenta o endereço de dados por quatro ciclos sem AS");
+        }
         runUntilPc(oddImmediateCpu, 0x200);
         check(oddImmediateCpu.state().address[0] == 0x1101 &&
                   oddImmediate.word(0x17fe) == 0x10a &&
@@ -529,8 +539,18 @@ int main()
               "CLR.L em registrador consome seis ciclos");
         check(execute(registersCpu) == 4 && (registersCpu.state().sr & 0x0f) == 4,
               "TST.W em registrador consome quatro ciclos");
-        check(execute(registersCpu) == 6 && (registersCpu.state().sr & 0x0f) == 4,
-              "CMP.L entre registradores consome seis ciclos");
+        for (unsigned cycle = 0; cycle < 4; ++cycle)
+            registersCpu.clock();
+        check(registersCpu.pins().active && registersCpu.pins().phase == 3 &&
+                  registersCpu.pins().address == 0x10a && !registersCpu.atInstructionBoundary(),
+              "CMP.L entre registradores conclui a pré-busca nos primeiros quatro ciclos");
+        registersCpu.clock();
+        check(!registersCpu.pins().active && !registersCpu.atInstructionBoundary(),
+              "CMP.L entre registradores inicia os ciclos internos após a pré-busca");
+        registersCpu.clock();
+        check(!registersCpu.pins().active && registersCpu.atInstructionBoundary() &&
+                  (registersCpu.state().sr & 0x0f) == 4,
+              "CMP.L entre registradores termina no segundo ciclo interno");
 
         // CLR do MC68000 lê a memória antes da escrita, inclusive em long.
         Bus clear;

@@ -73,10 +73,83 @@ namespace
             cpu.clock();
         check(cpu.resetComplete(), "Reset incompleto");
     }
+
+    void pcRelativeReads()
+    {
+        // d16(PC) e d8(PC,D1.W), ambos com base no endereço da extensão.
+        for (bool indexed : {false, true})
+            for (bool longOperand : {false, true})
+                for (bool supervisor : {false, true})
+                {
+                    const auto opcode = static_cast<std::uint16_t>(
+                        0x4cba | (indexed ? 1 : 0) | (longOperand ? 0x40 : 0));
+                    const unsigned fc = supervisor ? 6 : 2;
+                    Moto68000::State initial{};
+                    initial.pc = 0x100;
+                    initial.sr = supervisor ? 0x2719 : 0x0019;
+                    initial.data[0] = 0xdeadbeef;
+                    initial.data[1] = 2;
+                    initial.prefetch = {opcode, 1}; // Máscara D0.
+
+                    Bus bus;
+                    bus.setup();
+                    bus.words[0x104] = indexed ? 0x103a : 0x003c;
+                    bus.putLong(0x140, 0x81234567);
+                    bus.words[0x144] = 0xabcd;
+                    Moto68000 cpu(bus);
+                    cpu.restoreInstructionBoundary(initial, 0x1600, 0x1800);
+                    check(execute(cpu) == 20u + (longOperand ? 4 : 0) + (indexed ? 2 : 0) &&
+                              cpu.state().data[0] == (longOperand ? 0x81234567u : 0xffff8123u),
+                          "MOVEM relativo ao PC carrega D0 a partir da extensão");
+                    std::vector<std::uint32_t> reads;
+                    for (const auto &pins : bus.trace)
+                        if (pins.active && pins.phase == 3 && pins.address >= 0x140)
+                        {
+                            check(!pins.write && pins.functionCode == fc,
+                                  "MOVEM relativo ao PC usa FC de programa, inclusive na leitura adicional");
+                            reads.push_back(pins.address);
+                        }
+                    const auto expected = longOperand ? std::vector<std::uint32_t>{0x140, 0x142, 0x144}
+                                                      : std::vector<std::uint32_t>{0x140, 0x142};
+                    check(reads == expected, "MOVEM faz todas as leituras relativas ao PC");
+
+                    Bus odd;
+                    odd.setup();
+                    odd.words[0x104] = indexed ? 0x103b : 0x003d;
+                    odd.putLong(12, 0x200);
+                    odd.words[0x200] = odd.words[0x202] = 0x4e71;
+                    Moto68000 oddCpu(odd);
+                    oddCpu.restoreInstructionBoundary(initial, 0x1600, 0x1800);
+                    const unsigned beforeFault = indexed ? 10 : 8;
+                    for (unsigned cycle = 0; cycle < beforeFault + 58; ++cycle)
+                        oddCpu.clock();
+                    check(oddCpu.atInstructionBoundary() && oddCpu.state().pc == 0x200 &&
+                              oddCpu.lastException().vector == 3 && oddCpu.lastException().address == 0x141 &&
+                              oddCpu.state().data[0] == initial.data[0] &&
+                              oddCpu.supervisorStackPointer() == 0x17f2 && oddCpu.userStackPointer() == 0x1600,
+                          "MOVEM relativo ao PC aborta no vetor 3 antes de carregar D0");
+                    check(odd.words.at(0x17f2) == ((opcode & 0xffe0) | 0x10 | fc) &&
+                              odd.words.at(0x17f4) == 0 && odd.words.at(0x17f6) == 0x141 &&
+                              odd.words.at(0x17f8) == opcode && odd.words.at(0x17fa) == initial.sr &&
+                              odd.words.at(0x17fc) == 0 && odd.words.at(0x17fe) == 0x108,
+                          "MOVEM relativo ao PC empilha endereço ímpar, FC de programa e PC após a pré-busca");
+                    check(odd.reads == std::vector<std::uint32_t>({0x104, 0x106, 12, 14, 0x200, 0x202}),
+                          "A tentativa de leitura ímpar não acessa a memória");
+                    for (unsigned phase = 0; phase < 4; ++phase)
+                    {
+                        const auto &pins = odd.trace.at(beforeFault + phase);
+                        check(pins.addressError && !pins.addressStrobe && !pins.write &&
+                                  !pins.upperDataStrobe && !pins.lowerDataStrobe &&
+                                  pins.address == 0x140 && pins.phase == phase && pins.functionCode == fc,
+                              "MOVEM apresenta o endereço ímpar por quatro ciclos com AS desativado");
+                    }
+                }
+    }
 }
 
 int main()
 {
+    pcRelativeReads();
     Bus read;
     read.setup();
     read.words[0x100] = 0x4bf8; // LEA $1100.W,A5.

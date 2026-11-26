@@ -32,8 +32,13 @@ namespace
         bool tryAcknowledgeInterrupt(unsigned, M68KInterruptResponse &result) override
         {
             ++acknowledgements;
-            if (acknowledgeWait) { --acknowledgeWait; return false; }
-            if (acknowledgeError) throw M68KBusError("reconhecimento espúrio");
+            if (acknowledgeWait)
+            {
+                --acknowledgeWait;
+                return false;
+            }
+            if (acknowledgeError)
+                throw M68KBusError("reconhecimento espúrio");
             result = response;
             return true;
         }
@@ -42,32 +47,48 @@ namespace
 
     void check(bool condition, const char *message)
     {
-        if (!condition) throw std::runtime_error(message);
+        if (!condition)
+            throw std::runtime_error(message);
     }
 
     void run(Moto68000 &cpu, unsigned cycles)
     {
-        while (cycles--) cpu.clock();
+        while (cycles--)
+            cpu.clock();
     }
 
     void setup(Bus &bus, std::uint16_t sr = 0x2000)
     {
-        bus.words[0] = 0; bus.words[2] = 0x1000;
-        bus.words[4] = 0; bus.words[6] = 0x0100;
+        bus.words[0] = 0;
+        bus.words[2] = 0x1000;
+        bus.words[4] = 0;
+        bus.words[6] = 0x0100;
         bus.words[0x100] = 0x4e73; // RTE prepara o SR para o programa de teste.
         bus.words[0x102] = 0x4e71;
-        bus.words[0x1000] = sr; bus.words[0x1002] = 0; bus.words[0x1004] = 0x0120;
+        bus.words[0x1000] = sr;
+        bus.words[0x1002] = 0;
+        bus.words[0x1004] = 0x0120;
         bus.words[0x120] = bus.words[0x122] = bus.words[0x124] = 0x4e71;
-        bus.words[9 * 4] = 0; bus.words[9 * 4 + 2] = 0x0300;
-        bus.words[28 * 4] = 0; bus.words[28 * 4 + 2] = 0x0200;
-        bus.words[29 * 4] = 0; bus.words[29 * 4 + 2] = 0x0200;
-        bus.words[30 * 4] = 0; bus.words[30 * 4 + 2] = 0x0200;
-        bus.words[31 * 4] = 0; bus.words[31 * 4 + 2] = 0x0220;
-        bus.words[24 * 4] = 0; bus.words[24 * 4 + 2] = 0x0400;
-        bus.words[0x50 * 4] = 0; bus.words[0x50 * 4 + 2] = 0x0500;
-        bus.words[32 * 4] = 0; bus.words[32 * 4 + 2] = 0x0600;
-        bus.words[4 * 4] = 0; bus.words[4 * 4 + 2] = 0x0700;
-        bus.words[3 * 4] = 0; bus.words[3 * 4 + 2] = 0x0700;
+        bus.words[9 * 4] = 0;
+        bus.words[9 * 4 + 2] = 0x0300;
+        bus.words[28 * 4] = 0;
+        bus.words[28 * 4 + 2] = 0x0200;
+        bus.words[29 * 4] = 0;
+        bus.words[29 * 4 + 2] = 0x0200;
+        bus.words[30 * 4] = 0;
+        bus.words[30 * 4 + 2] = 0x0200;
+        bus.words[31 * 4] = 0;
+        bus.words[31 * 4 + 2] = 0x0220;
+        bus.words[24 * 4] = 0;
+        bus.words[24 * 4 + 2] = 0x0400;
+        bus.words[0x50 * 4] = 0;
+        bus.words[0x50 * 4 + 2] = 0x0500;
+        bus.words[32 * 4] = 0;
+        bus.words[32 * 4 + 2] = 0x0600;
+        bus.words[4 * 4] = 0;
+        bus.words[4 * 4 + 2] = 0x0700;
+        bus.words[3 * 4] = 0;
+        bus.words[3 * 4 + 2] = 0x0700;
         bus.words[0x200] = bus.words[0x220] = bus.words[0x300] = 0x4e73;
         bus.words[0x400] = bus.words[0x500] = bus.words[0x600] = 0x4e73;
         bus.words[0x700] = 0x4e71;
@@ -83,7 +104,8 @@ namespace
     void checkFrame(const Bus &bus, std::uint16_t sr, std::uint16_t pc)
     {
         check(bus.words.at(0x1000) == sr && bus.words.at(0x1002) == 0 &&
-              bus.words.at(0x1004) == pc, "quadro curto da interrupção");
+                  bus.words.at(0x1004) == pc,
+              "quadro curto da interrupção");
     }
 }
 
@@ -96,7 +118,8 @@ int main()
     autoCpu.setInterruptLevel(5);
     run(autoCpu, 44);
     check(autoCpu.state().pc == 0x200 && autoCpu.state().address[7] == 0x1000 &&
-          autoCpu.state().sr == 0x2500, "autovetor de nível 5 em 44 ciclos");
+              autoCpu.state().sr == 0x2500,
+          "autovetor de nível 5 em 44 ciclos");
     checkFrame(autoBus, 0x2000, 0x0120);
     check(autoBus.acknowledgements == 1 && autoBus.writes.size() == 3,
           "um reconhecimento e três escritas na pilha");
@@ -111,7 +134,7 @@ int main()
         {
             sawAck = true;
             check(pins.active && pins.functionCode == 7 && pins.interruptLevel == 5 &&
-                  pins.address == 0xfffffb && !pins.write,
+                      pins.address == 0xfffffb && !pins.write,
                   "pinos do reconhecimento de interrupção");
             if (pins.phase >= 1)
                 check(pins.upperDataStrobe && pins.lowerDataStrobe,
@@ -168,7 +191,8 @@ int main()
     check(edgeCpu.state().pc == 0x220 && edgeCpu.state().sr == 0x2700,
           "subida do nível 7 ignora máscara 7");
     check(edge.words.at(0xffa) == 0x2700 && edge.words.at(0xffc) == 0 &&
-          edge.words.at(0xffe) == 0x0100, "quadro do nível 7");
+              edge.words.at(0xffe) == 0x0100,
+          "quadro do nível 7");
     run(edgeCpu, 20 + 4);
     check(edgeCpu.state().pc == 0x102 && edge.acknowledgements == 1,
           "nível 7 mantido alto não repete a interrupção");
@@ -207,11 +231,18 @@ int main()
     spuriousCpu.setInterruptLevel(4);
     run(spuriousCpu, 44);
     check(spuriousCpu.state().pc == 0x400 && !spuriousCpu.halted() &&
-          spuriousCpu.state().sr == 0x2400, "BERR no reconhecimento usa vetor espúrio");
+              spuriousCpu.state().sr == 0x2400,
+          "BERR no reconhecimento usa vetor espúrio");
 
     bool invalidLevel = false;
-    try { autoCpu.setInterruptLevel(8); }
-    catch (const std::invalid_argument &) { invalidLevel = true; }
+    try
+    {
+        autoCpu.setInterruptLevel(8);
+    }
+    catch (const std::invalid_argument &)
+    {
+        invalidLevel = true;
+    }
     check(invalidLevel, "níveis IPL válidos são 0..7");
 
     Bus traced;
@@ -220,7 +251,7 @@ int main()
     prepare(traceCpu);
     run(traceCpu, 4 + 34);
     check(traceCpu.state().pc == 0x300 && traceCpu.state().sr == 0x2000 &&
-          traceCpu.state().address[7] == 0x1000,
+              traceCpu.state().address[7] == 0x1000,
           "NOP seguido de trace em 34 ciclos");
     checkFrame(traced, 0xa000, 0x0122);
     run(traceCpu, 20);
@@ -231,18 +262,21 @@ int main()
           "trace acompanha a instrução seguinte");
 
     Bus userTrace;
-    setup(userTrace, 0x8000); // T ativo em modo usuário.
+    setup(userTrace, 0xd8e0); // T ativo em modo usuário, com bits reservados no quadro.
     Moto68000 userTraceCpu(userTrace);
     prepare(userTraceCpu);
-    check(userTraceCpu.state().address[7] == 0, "USP após retorno ao usuário");
+    check(userTraceCpu.state().sr == 0x8000 && userTraceCpu.state().address[7] == 0 &&
+              userTraceCpu.supervisorStackPointer() == 0x1006,
+          "RTE filtra o SR e passa do SSP para o USP");
     run(userTraceCpu, 4 + 34);
     check(userTraceCpu.state().pc == 0x300 && userTraceCpu.state().sr == 0x2000 &&
-          userTraceCpu.state().address[7] == 0x1000 &&
-          userTrace.words.at(0x1000) == 0x8000 && userTrace.words.at(0x1004) == 0x0122,
+              userTraceCpu.state().address[7] == 0x1000 &&
+              userTrace.words.at(0x1000) == 0x8000 && userTrace.words.at(0x1004) == 0x0122,
           "trace de usuário troca para SSP e preserva SR");
     run(userTraceCpu, 20);
     check(userTraceCpu.state().pc == 0x122 && userTraceCpu.state().sr == 0x8000 &&
-          userTraceCpu.state().address[7] == 0, "RTE devolve o USP após trace");
+              userTraceCpu.state().address[7] == 0,
+          "RTE devolve o USP após trace");
 
     Bus tracedBranch;
     setup(tracedBranch, 0xa000);
@@ -262,7 +296,7 @@ int main()
     prepare(memoryCpu);
     run(memoryCpu, 8 + 34);
     check(memoryCpu.state().pc == 0x300 && memoryCpu.state().address[0] == 0x400 &&
-          tracedMemory.words.at(0x1004) == 0x0124,
+              tracedMemory.words.at(0x1004) == 0x0124,
           "trace aguarda o fim de instrução com extensão");
 
     Bus tracedReturn;
@@ -276,7 +310,7 @@ int main()
     prepare(returnCpu);
     run(returnCpu, 20 + 34);
     check(returnCpu.state().pc == 0x300 && returnCpu.state().sr == 0x2000 &&
-          tracedReturn.words.at(0x100a) == 0x0140,
+              tracedReturn.words.at(0x100a) == 0x0140,
           "RTE iniciado com T ativo gera trace mesmo restaurando T limpo");
 
     Bus priority;
@@ -290,7 +324,7 @@ int main()
           "trace precede interrupção simultânea");
     run(priorityCpu, 44);
     check(priorityCpu.state().pc == 0x200 && priority.words.at(0xffa) == 0x2000 &&
-          priority.words.at(0xffe) == 0x0300,
+              priority.words.at(0xffe) == 0x0300,
           "interrupção interrompe antes do tratador de trace");
     priorityCpu.setInterruptLevel(0);
     run(priorityCpu, 20 + 20);

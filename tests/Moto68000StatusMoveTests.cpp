@@ -160,8 +160,8 @@ namespace
 
         Bus toSr;
         toSr.setup();
-        toSr.words[0x100] = 0x46fc; // MOVE #$0700,SR remove S.
-        toSr.words[0x102] = 0x0700;
+        toSr.words[0x100] = 0x46fc; // MOVE para SR remove S e ignora os bits reservados.
+        toSr.words[0x102] = 0x5fe0;
         Moto68000 toSrCpu(toSr);
         boot(toSrCpu);
         toSr.readCodes.clear();

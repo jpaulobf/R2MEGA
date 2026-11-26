@@ -237,7 +237,7 @@ namespace
         vector(bus, 27);
         bus.setWord(0x104, 0x7009); // MOVEQ #9,D0
         bus.setWord(0x106, 0x4e71);
-        state = initial(0x4e72, 0x0215); // STOP, entra em modo usuário com IPL = 2.
+        state = initial(0x4e72, 0x5af5); // STOP ignora os bits reservados e entra em modo usuário com IPL = 2.
         cpu.restoreInstructionBoundary(state, 0x800, 0x1000);
         run(cpu, 4);
         cpu.setInterruptLevel(2);
