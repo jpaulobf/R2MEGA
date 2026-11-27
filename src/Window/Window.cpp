@@ -48,6 +48,11 @@ namespace R2MEGA::Window
                 if (!openHandler) throw std::runtime_error("ROM loading is unavailable.");
                 romName = openHandler(path); }) {}
 
+        bool hasRom() const
+        {
+            return emulationCallbacks.hasRom && emulationCallbacks.hasRom();
+        }
+
         void updateTitle()
         {
             const double measured = emulationCallbacks.fps ? emulationCallbacks.fps() : 0;
@@ -163,6 +168,11 @@ namespace R2MEGA::Window
                 !s.aboutOpen)
                 s.files.requestOpen();
             if (event.type == SDL_EVENT_KEY_DOWN && event.key.windowID == SDL_GetWindowID(s.window) &&
+                !event.key.repeat && event.key.key == SDLK_F12 &&
+                !(event.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_SHIFT | SDL_KMOD_GUI)) &&
+                !s.files.isOpen() && !s.aboutOpen && s.emulationCallbacks.reset && s.hasRom())
+                s.emulationCallbacks.reset();
+            if (event.type == SDL_EVENT_KEY_DOWN && event.key.windowID == SDL_GetWindowID(s.window) &&
                 !event.key.repeat && event.key.key == SDLK_PAUSE && s.emulationCallbacks.togglePause)
                 s.emulationCallbacks.togglePause();
             if (event.type == SDL_EVENT_KEY_DOWN && event.key.windowID == SDL_GetWindowID(s.window) &&
@@ -228,6 +238,29 @@ namespace R2MEGA::Window
             {
                 if (ImGui::MenuItem("Open...", "Ctrl+O"))
                     s.files.requestOpen();
+                const bool loaded = s.hasRom();
+                if (ImGui::MenuItem("Reset", "F12", false, loaded && static_cast<bool>(s.emulationCallbacks.reset)))
+                    s.emulationCallbacks.reset();
+                if (ImGui::MenuItem("Unload", nullptr, false, loaded && static_cast<bool>(s.emulationCallbacks.unload)))
+                {
+                    s.emulationCallbacks.unload();
+                    s.romName.clear();
+                }
+                ImGui::Separator();
+                const auto &recent = s.files.recentFiles();
+                if (ImGui::BeginMenu("Recent Files", !recent.empty()))
+                {
+                    for (std::size_t i = 0; i < recent.size(); ++i)
+                    {
+                        const auto &path = recent[i];
+                        ImGui::PushID(static_cast<int>(i));
+                        if (ImGui::MenuItem(path.filename().u8string().c_str()))
+                            s.files.requestOpen(path);
+                        ImGui::SetItemTooltip("%s", path.u8string().c_str());
+                        ImGui::PopID();
+                    }
+                    ImGui::EndMenu();
+                }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Exit"))
                     s.running = false;
@@ -271,6 +304,7 @@ namespace R2MEGA::Window
             }
             ImGui::EndMainMenuBar();
         }
+        s.files.draw();
         const auto *pixels = s.videoProvider ? s.videoProvider() : nullptr;
         if (s.videoTexture && pixels)
         {
@@ -384,7 +418,6 @@ namespace R2MEGA::Window
         }
         if (!aboutVisible)
             s.aboutOpen = false;
-        s.files.draw();
         s.keyboardDialog.draw([&](const Systems::KeyboardMapping &mapping)
                               {
             if (!s.keyboardConfig.save(mapping)) return false;

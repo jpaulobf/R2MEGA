@@ -67,6 +67,9 @@ namespace R2MEGA::Window
             std::function<void()> togglePause;
             std::function<bool()> isPaused;
             std::function<double()> fps;
+            std::function<bool()> hasRom;
+            std::function<void()> reset;
+            std::function<void()> unload;
         };
 
         explicit Window(OpenHandler openHandler = {}, VideoProvider videoProvider = {}, RunningProvider runningProvider = {},
