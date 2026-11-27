@@ -36,6 +36,51 @@ namespace
               "O scheduler perdeu a proporção de sete clocks mestres por ciclo do 68000");
     }
 
+    void testPeriodicBusWait(const std::filesystem::path &directory)
+    {
+        const auto path = directory / "m68k-bus-wait.md";
+        for (const bool write : {false, true})
+        {
+            std::vector<std::uint8_t> rom(0x200);
+            putWord(rom, 0, 0x00ff);
+            putWord(rom, 2, 0xff00);
+            putWord(rom, 6, 0x100);
+            putWord(rom, 0x100, 0x7034); // MOVEQ #$34,D0.
+            putWord(rom, 0x102, 0x41f8); // LEA $FF20.W,A0.
+            putWord(rom, 0x104, 0xff20);
+            for (unsigned address = 0x106; address < 0x132; address += 2)
+                putWord(rom, address, 0x4e71);
+            putWord(rom, 0x12c, write ? 0x3080 : 0x3210); // MOVE.W D0,(A0) ou (A0),D1.
+            {
+                std::ofstream file(path, std::ios::binary);
+                file.write(reinterpret_cast<const char *>(rom.data()), rom.size());
+                check(bool(file), "Não foi possível gravar a ROM de espera do barramento");
+            }
+
+            auto board = std::make_unique<Board>();
+            board->insertCartridge(Cartridge::load(path));
+            board->writeWord(0xffff20, 0x1234);
+            runUntil(*board, 21);
+            check(board->m68k().state().cycles == 128 && board->m68k().state().pc == 0x12c,
+                  "A ROM deve chegar ao acesso de RAM depois dos primeiros 128 ciclos");
+            for (unsigned cycle = 129; cycle <= 133; ++cycle)
+            {
+                for (unsigned tick = 0; tick < Scheduler::M68KDivider; ++tick)
+                    board->clock();
+                const auto &pins = board->m68k().pins();
+                const bool waiting = cycle == 131 || cycle == 132;
+                check(pins.waiting == waiting && pins.address == 0xffff20 && pins.write == write,
+                      "A espera periódica deve segurar o mesmo acesso por dois ciclos");
+                check(board->readWord(0xffff20) == (write && cycle == 133 ? 0x0034 : 0x1234),
+                      "A escrita só pode chegar à RAM quando DTACK liberar o acesso");
+            }
+            runUntil(*board, 22);
+            check(board->m68k().state().cycles == 138 &&
+                      (write || board->m68k().state().data[1] == 0x1234),
+                  "O MOVE deve terminar em dez ciclos e preservar o dado lido");
+        }
+    }
+
     void testCartridgeReset(const std::filesystem::path &directory)
     {
         const auto path = directory / "m68k-vres.md";
@@ -82,7 +127,8 @@ namespace
         runUntil(board, 1);
         const auto resetStart = board.masterCycles();
         constexpr auto divider = Scheduler::M68KDivider;
-        for (unsigned cycle = 1; cycle <= 132 * divider; ++cycle)
+        // A pré-busca final recebe dois ciclos de espera da placa.
+        for (unsigned cycle = 1; cycle <= 134 * divider; ++cycle)
         {
             board.clock();
             check(board.cartridgeVresAsserted() == (cycle >= 5 * divider && cycle < 129 * divider),
@@ -173,6 +219,7 @@ int main(int argc, char **argv)
         check(argc == 2, "Diretório de saída da ROM ausente");
         const auto directory = std::filesystem::path(argv[1]);
         std::filesystem::create_directories(directory);
+        testPeriodicBusWait(directory);
         testCartridgeReset(directory);
         const auto path = directory / "m68k-diagnostic.md";
         std::vector<std::uint8_t> rom(0x200, 0);

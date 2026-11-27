@@ -378,6 +378,39 @@ namespace
                   (registerCpu.state().sr & 0x15) == 0,
               "ABCD usa X anterior e limpa Z após resultado não zero");
 
+        struct DecimalSum
+        {
+            unsigned source, target, ccr, result, flags;
+        };
+        for (const auto &sum : {DecimalSum{0x00, 0x79, 0x11, 0x80, 0x0a},
+                                DecimalSum{0x04, 0x8f, 0x11, 0x9a, 0x08},
+                                DecimalSum{0x34, 0x12, 0x0e, 0x46, 0x00}})
+        {
+            Bus bus;
+            bus.setup();
+            Moto68000::State initial;
+            initial.pc = 0x100;
+            initial.prefetch = {0xc101, 0x4e71}; // ABCD D1,D0.
+            initial.sr = static_cast<std::uint16_t>(0x2700 | sum.ccr);
+            initial.data[0] = 0x5a5a5a00u | sum.target;
+            initial.data[1] = sum.source;
+            Moto68000 cpu(bus);
+            cpu.restoreInstructionBoundary(initial, 0, 0x1800);
+            for (unsigned cycle = 0; cycle < 4; ++cycle)
+                cpu.clock();
+            check(cpu.pins().active && cpu.pins().phase == 3 && cpu.pins().address == 0x104 &&
+                      !cpu.atInstructionBoundary(),
+                  "ABCD em registradores conclui a pré-busca antes dos ciclos internos");
+            cpu.clock();
+            check(!cpu.pins().active && !cpu.atInstructionBoundary(),
+                  "ABCD ocupa o primeiro ciclo interno após a pré-busca");
+            cpu.clock();
+            check(!cpu.pins().active && cpu.atInstructionBoundary() &&
+                      cpu.state().data[0] == (0x5a5a5a00u | sum.result) &&
+                      cpu.state().sr == (0x2700u | sum.flags),
+                  "ABCD termina em seis ciclos com resultado e flags do ajuste decimal");
+        }
+
         Bus memory;
         memory.setup();
         memory.putWord(0x100, 0x41f8);
