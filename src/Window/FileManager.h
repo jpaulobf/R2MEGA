@@ -13,11 +13,12 @@ namespace R2MEGA::Window
         // Chamado com o caminho selecionado; exceções são exibidas na interface.
         using OpenHandler = std::function<void(const std::filesystem::path &)>;
         explicit FileManager(OpenHandler handler);
-        // Solicita a abertura do navegador no próximo desenho da interface.
-        void requestOpen();
+        // Abre o navegador ou solicita o carregamento de uma ROM recente.
+        void requestOpen(std::filesystem::path file = {});
         // Desenha o navegador e processa a seleção e a navegação.
         void draw();
         bool isOpen() const { return requested_ || open_; }
+        const std::vector<std::filesystem::path> &recentFiles() const { return recentFiles_; }
 
     private:
         struct Entry
@@ -27,9 +28,16 @@ namespace R2MEGA::Window
             bool directory;
         };
         void navigate(const std::filesystem::path &path);
+        void browseLastDirectory();
+        void load(const std::filesystem::path &path);
+        void readConfig();
+        void saveConfig() const;
+
         OpenHandler openHandler_;
         std::filesystem::path directory_;
         std::vector<Entry> entries_;
+        std::vector<std::filesystem::path> recentFiles_;
+        std::filesystem::path lastRomDirectory_, pendingFile_;
         std::string error_;
         bool requested_ = false, open_ = false;
     };
