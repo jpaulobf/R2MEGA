@@ -38,8 +38,10 @@ totais por fonte e o primeiro caso divergente por opcode.
 ## ROMs e controles
 
 `File > Open...` ou `Ctrl+O` carrega arquivos `.md`, `.gen`, `.bin`, `.smd` e
-arquivos `.zip` com uma ROM compatível. O controle padrão de ambos os jogadores
-é o teclado:
+arquivos `.zip` com uma ROM compatível. `File > Reset` ou `F12` reinicia o jogo
+atual. `File > Unload` descarrega a ROM e volta à tela inicial do emulador.
+
+O controle padrão de ambos os jogadores é o teclado.
 
 | Função | Jogador 1 | Jogador 2 |
 | --- | --- | --- |
@@ -68,6 +70,17 @@ no perfil NTSC atual. Num monitor mais rápido, a janela pode reapresentar o
 `Hacks > Enable Fast-Forward` permite acelerar enquanto Tab estiver pressionado
 e suspende temporariamente o VSync durante o avanço rápido.
 
+## Áudio
+
+O áudio estéreo a 48 kHz combina os tons e o ruído do SN76489 com a
+síntese FM e o DAC do YM2612. O SDL3 usa o dispositivo de áudio padrão.
+Ao pausar, trocar de ROM ou alternar o avanço rápido, o emulador descarta
+as amostras enfileiradas.
+
 ## Licença
 
 GNU GPL v3.0. Consulte [LICENSE](LICENSE).
+
+O YM2612 usa [ymfm](https://github.com/aaronsgiles/ymfm/tree/81aec25ccbb98f4873a255f7551ac4dadac59b4a),
+de Aaron Giles, sob [licença BSD de 3 cláusulas](third_party/ymfm/LICENSE).
+Os pacotes binários incluem essa licença como `LICENSE-ymfm`.
