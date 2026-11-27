@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(R2MEGA VERSION 0.1.0 LANGUAGES C CXX)
+project(R2MEGA VERSION 0.2.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -10,7 +10,15 @@ set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(zlib GIT_REPOSITORY https://github.com/madler/zlib.git GIT_TAG v1.3.1)
 FetchContent_MakeAvailable(zlib)
 
+add_library(R2MEGA_ymfm OBJECT
+    third_party/ymfm/ymfm_adpcm.cpp
+    third_party/ymfm/ymfm_opn.cpp
+    third_party/ymfm/ymfm_ssg.cpp
+)
+target_compile_features(R2MEGA_ymfm PRIVATE cxx_std_17)
+
 add_library(R2MEGA_core STATIC
+    $<TARGET_OBJECTS:R2MEGA_ymfm>
     src/Common/RomFile.cpp
     src/Core/Board.cpp
     src/Core/Scheduler/Scheduler.cpp
@@ -25,6 +33,7 @@ add_library(R2MEGA_core STATIC
 )
 target_compile_features(R2MEGA_core PUBLIC cxx_std_17)
 target_include_directories(R2MEGA_core PUBLIC src PRIVATE ${zlib_SOURCE_DIR} ${zlib_BINARY_DIR})
+target_include_directories(R2MEGA_core SYSTEM PRIVATE third_party/ymfm)
 target_link_libraries(R2MEGA_core PRIVATE zlibstatic)
 if(MSVC)
     target_compile_options(R2MEGA_core PRIVATE /W4 /utf-8)
@@ -59,7 +68,7 @@ if(R2MEGA_BUILD_GUI)
     target_include_directories(R2MEGA_imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
     target_link_libraries(R2MEGA_imgui PUBLIC SDL3::SDL3-static)
     add_library(R2MEGA_application STATIC
-        src/Systems/Engine.cpp src/Systems/Input.cpp
+        src/Systems/Audio.cpp src/Systems/Engine.cpp src/Systems/Input.cpp
         src/Window/Window.cpp src/Window/FileManager.cpp
         src/Window/KeyboardConfig.cpp src/Window/KeyboardDialog.cpp)
     target_compile_features(R2MEGA_application PUBLIC cxx_std_17)
@@ -200,6 +209,9 @@ if(BUILD_TESTING)
     add_executable(psg_tests tests/SN76489Tests.cpp)
     target_link_libraries(psg_tests PRIVATE R2MEGA_core)
     add_test(NAME psg_tests COMMAND psg_tests)
+    add_executable(ym2612_tests tests/YM2612Tests.cpp)
+    target_link_libraries(ym2612_tests PRIVATE R2MEGA_core)
+    add_test(NAME ym2612_tests COMMAND ym2612_tests)
     add_executable(memory_tests tests/MemoryTests.cpp)
     target_link_libraries(memory_tests PRIVATE R2MEGA_core)
     add_test(NAME memory_tests COMMAND memory_tests)
@@ -209,6 +221,10 @@ if(BUILD_TESTING)
 endif()
 
 if(BUILD_TESTING AND R2MEGA_BUILD_GUI)
+    add_executable(audio_tests tests/AudioTests.cpp)
+    target_link_libraries(audio_tests PRIVATE R2MEGA_application)
+    add_test(NAME audio_tests COMMAND audio_tests)
+    set_tests_properties(audio_tests PROPERTIES ENVIRONMENT "SDL_AUDIO_DRIVER=dummy")
     add_executable(input_tests tests/InputTests.cpp)
     target_link_libraries(input_tests PRIVATE R2MEGA_application R2MEGA_imgui)
     add_test(NAME input_tests COMMAND input_tests)
