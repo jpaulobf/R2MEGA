@@ -2,34 +2,28 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 
 namespace R2MEGA::Core
 {
-    // Estado mínimo das portas do sintetizador FM YM2612.
+    // Portas, temporização e saída estéreo do sintetizador FM e DAC.
     class YM2612
     {
     public:
-        void reset()
-        {
-            status_ = 0;
-            address_.fill(0);
-            registers_.fill(0);
-        }
-        // Os temporizadores e o sinal de ocupado serão ligados ao núcleo de síntese.
-        unsigned readStatus() const { return status_; }
-        void writePort(unsigned port, std::uint8_t value)
-        {
-            const unsigned bank = (port >> 1) & 1;
-            if (port & 1)
-                registers_[bank * 256 + address_[bank]] = value;
-            else
-                address_[bank] = value;
-        }
+        YM2612();
+        ~YM2612();
+        void reset();
+        // Um clock de entrada a cada sete clocks mestres do Mega Drive.
+        void clock();
+        std::uint8_t readPort(unsigned port) const;
+        void writePort(unsigned port, std::uint8_t value);
+        const std::array<std::int32_t, 2> &sample() const;
         std::uint8_t registerValue(unsigned bank, unsigned index) const { return registers_.at(bank * 256 + index); }
 
     private:
-        unsigned status_ = 0;
-        std::array<std::uint8_t, 2> address_{};
+        struct Chip;
+        std::unique_ptr<Chip> chip_;
+        unsigned address_ = 0;
         std::array<std::uint8_t, 512> registers_{};
     };
 }
