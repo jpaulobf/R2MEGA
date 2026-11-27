@@ -1679,14 +1679,14 @@ namespace R2MEGA::Core
                     op.result = subtractDecimalByte(lhs, rhs, state_.sr, op.flags);
                     return;
                 }
-                // Ajusta os dois dígitos decimais; Z é acumulado entre bytes.
+                // O ajuste alto depende da soma binária, inclusive para dígitos fora de BCD.
+                const unsigned binary = lhs + rhs + extend;
                 const unsigned low = (lhs & 15) + (rhs & 15) + extend;
-                unsigned sum = lhs + rhs + extend + (low > 9 ? 6 : 0);
-                const bool carry = sum > 0x99;
-                if (carry)
-                    sum += 0x60;
-                op.result = sum & 0xff;
-                op.flags = (state_.sr & 0x0a) | (carry ? 0x11 : 0) |
+                const bool carry = binary > 0x99;
+                op.result = (binary + (low > 9 ? 6 : 0) + (carry ? 0x60 : 0)) & 0xff;
+                const bool overflow = (~binary & op.result & sign) != 0;
+                op.flags = (carry ? 0x11 : 0) | (op.result & sign ? 0x08 : 0) |
+                           (overflow ? 0x02 : 0) |
                            ((state_.sr & 0x04) && op.result == 0 ? 0x04 : 0);
                 return;
             }
@@ -1813,7 +1813,7 @@ namespace R2MEGA::Core
                 op.nextFollowing = pendingWord_;
                 if (op.memory && !op.compareMemory)
                     op.phase = ExtendedArithmetic::Phase::Write;
-                else if (!op.memory && (op.size == 4 || (op.decimal && op.subtract)))
+                else if (!op.memory && (op.size == 4 || op.decimal))
                 {
                     op.idle = op.size == 4 ? 4 : 2;
                     op.phase = ExtendedArithmetic::Phase::FinalIdle;
@@ -3671,7 +3671,7 @@ namespace R2MEGA::Core
                 op.size = 1;
                 op.sourceReg = opcode & 7;
                 op.targetReg = (opcode >> 9) & 7;
-                op.idle = op.subtract && !op.memory ? 0 : 2;
+                op.idle = op.memory ? 2 : 0;
                 op.nextOpcode = state_.prefetch[1];
                 memoryOp_ = MemoryOp::ExtendedArithmetic;
                 clockExtendedArithmetic();
