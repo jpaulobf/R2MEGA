@@ -8,6 +8,7 @@ namespace R2MEGA::Core
     namespace
     {
         constexpr std::uint32_t cartridgeRomEnd = 0x3fffff;
+        constexpr auto m68kBusDelayInterval = 128 * Scheduler::M68KDivider;
 
         [[noreturn]] void notImplemented()
         {
@@ -40,6 +41,8 @@ namespace R2MEGA::Core
         sn76489_.reset();
         ym2612_.reset();
         scheduler_.reset();
+        nextM68KBusDelay_ = m68kBusDelayInterval;
+        m68kBusWait_ = 0;
         cpu_.reset();
         z80_.reset();
         z80BusRequested_ = false;
@@ -57,8 +60,25 @@ namespace R2MEGA::Core
 
     void Board::observe(const M68KPins &pins)
     {
+        // A espera periódica pertence ao próximo ciclo de barramento, inclusive
+        // na ROM. Com AS já ativo, TAS ainda está no mesmo ciclo indivisível.
+        if (pins.active && pins.phase == 0 && !pins.addressStrobe &&
+            !pins.interruptAcknowledge && scheduler_.masterCycles() >= nextM68KBusDelay_)
+        {
+            nextM68KBusDelay_ = scheduler_.masterCycles() + m68kBusDelayInterval;
+            const bool vdpWrite = pins.write && pins.address >= 0xc00000 && pins.address <= 0xc00007;
+            m68kBusWait_ = vdpWrite ? 0 : 2;
+        }
         // O RESET emitido pelo 68000 chega ao conector pela rede /VRES.
         driveCartridgeVres(pins.resetAsserted);
+    }
+
+    bool Board::m68kBusReady()
+    {
+        if (m68kBusWait_ == 0)
+            return true;
+        --m68kBusWait_;
+        return false;
     }
 
     void Board::driveCartridgeVres(bool asserted)
@@ -95,6 +115,8 @@ namespace R2MEGA::Core
     {
         if (!vdp_.dmaBlocksM68K())
             cpu_.clock();
+        else if (scheduler_.masterCycles() >= nextM68KBusDelay_)
+            nextM68KBusDelay_ = scheduler_.masterCycles() + m68kBusDelayInterval;
     }
     void Board::clockZ80()
     {
@@ -185,6 +207,16 @@ namespace R2MEGA::Core
         if (address == 0xc00000 || address == 0xc00002)
             return vdp_.readData();
         return (std::uint16_t(readByte(address)) << 8) | readByte(address + 1);
+    }
+
+    bool Board::tryReadByte(std::uint32_t address, std::uint8_t &value)
+    {
+        return m68kBusReady() && M68KBus::tryReadByte(address, value);
+    }
+
+    bool Board::tryReadWord(std::uint32_t address, std::uint16_t &value)
+    {
+        return m68kBusReady() && M68KBus::tryReadWord(address, value);
     }
 
     void Board::writeByte(std::uint32_t address, std::uint8_t value)
@@ -305,6 +337,8 @@ namespace R2MEGA::Core
 
     bool Board::tryWriteByte(std::uint32_t address, std::uint8_t value)
     {
+        if (!m68kBusReady())
+            return false;
         if (address >= 0xc00000 && address <= 0xc00003)
             return vdp_.tryWriteData(vdpDataByte(value));
         writeByte(address, value);
@@ -313,6 +347,8 @@ namespace R2MEGA::Core
 
     bool Board::tryWriteWord(std::uint32_t address, std::uint16_t value)
     {
+        if (!m68kBusReady())
+            return false;
         if (address == 0xc00000 || address == 0xc00002)
             return vdp_.tryWriteData(value);
         writeWord(address, value);

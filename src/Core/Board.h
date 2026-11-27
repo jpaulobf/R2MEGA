@@ -52,6 +52,8 @@ namespace R2MEGA::Core
         // Acessos do 68000 aos dispositivos atualmente ligados ao barramento.
         std::uint8_t readByte(std::uint32_t address) override;
         std::uint16_t readWord(std::uint32_t address) override;
+        bool tryReadByte(std::uint32_t address, std::uint8_t &value) override;
+        bool tryReadWord(std::uint32_t address, std::uint16_t &value) override;
         bool tryWriteByte(std::uint32_t address, std::uint8_t value) override;
         bool tryWriteWord(std::uint32_t address, std::uint16_t value) override;
         bool tryAcknowledgeInterrupt(unsigned level, M68KInterruptResponse &response) override;
@@ -64,6 +66,7 @@ namespace R2MEGA::Core
 
     private:
         void observe(const M68KPins &pins) override;
+        bool m68kBusReady();
         void driveCartridgeVres(bool asserted);
         void clockVDP() override;
         void clockM68K() override;
@@ -89,5 +92,7 @@ namespace R2MEGA::Core
         bool z80ResetAsserted_ = true;
         std::uint16_t z80Bank_ = 0;
         unsigned externalInterruptLevel_ = 0;
+        std::uint64_t nextM68KBusDelay_ = 0;
+        unsigned m68kBusWait_ = 0;
     };
 }
