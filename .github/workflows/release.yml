@@ -53,6 +53,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path release_pkg | Out-Null
           Copy-Item -LiteralPath build/R2MEGA.exe, LICENSE, README.md -Destination release_pkg/
+          Copy-Item -LiteralPath third_party/ymfm/LICENSE -Destination release_pkg/LICENSE-ymfm
           # Inclui apenas os DLLs do MinGW usados pelo executável.
           $imports = & objdump -p build/R2MEGA.exe
           if ($LASTEXITCODE -ne 0) { throw 'Falha ao inspecionar dependências do executável.' }
@@ -112,7 +113,8 @@ jobs:
         run: |
           mkdir release_pkg
           cp build-linux/R2MEGA LICENSE README.md release_pkg/
-          tar -czf R2MEGA_Linux_x64.tar.gz -C release_pkg R2MEGA LICENSE README.md
+          cp third_party/ymfm/LICENSE release_pkg/LICENSE-ymfm
+          tar -czf R2MEGA_Linux_x64.tar.gz -C release_pkg R2MEGA LICENSE README.md LICENSE-ymfm
 
       - name: Enviar pacote Linux
         uses: actions/upload-artifact@v4
