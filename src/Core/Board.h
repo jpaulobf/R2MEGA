@@ -12,7 +12,9 @@
 #include "Core/Memory/AudioRAM.h"
 #include "Core/VDP/VDP.h"
 #include "Core/Scheduler/Scheduler.h"
+#include<array>
 #include <functional>
+#include <vector>
 
 namespace R2MEGA::Core
 {
@@ -21,12 +23,17 @@ namespace R2MEGA::Core
     class Board final : public M68KBus, public Z80Bus, private SchedulerTarget
     {
     public:
+        static constexpr unsigned AudioSampleRate = 48000;
+        static constexpr unsigned AudioChannels = 2;
+
         Board();
         Board(const Board &) = delete;
         Board &operator=(const Board &) = delete;
 
         // Instala o cartucho e inicia a leitura dos vetores de reset do 68000.
         void insertCartridge(Cartridge cartridge);
+        // Reinicializa a placa com o cartucho já instalado.
+        void reset();
         // /VRES do conector do cartucho (B27). Verdadeiro representa o nível baixo.
         bool cartridgeVresAsserted() const { return cartridgeVresAsserted_; }
         // Notifica cada mudança de nível de forma síncrona no clock ou na troca do cartucho.
@@ -36,6 +43,9 @@ namespace R2MEGA::Core
         const Z80 &z80() const { return z80_; }
         const SN76489 &psg() const { return sn76489_; }
         const YM2612 &ym2612() const { return ym2612_; }
+
+        // Entrega e consome o PCM estéreo intercalado produzido desde a última chamada.
+        void takeAudio(std::vector<float> &samples);
 
         // Atualiza os botões lógicos das duas portas antes da leitura pela ROM.
         void setControllerButtons(unsigned player, std::uint16_t buttons) { controllers_.setButtons(player, buttons); }
@@ -71,6 +81,7 @@ namespace R2MEGA::Core
         void clockVDP() override;
         void clockM68K() override;
         void clockZ80() override;
+        void sampleAudio();
         bool z80BusGranted() const;
         void setZ80BusRequest(bool requested);
         void setZ80Reset(bool asserted);
@@ -94,5 +105,9 @@ namespace R2MEGA::Core
         unsigned externalInterruptLevel_ = 0;
         std::uint64_t nextM68KBusDelay_ = 0;
         unsigned m68kBusWait_ = 0;
+        std::vector<float> audioSamples_;
+        unsigned audioPhase_ = 0;
+        std::array<std::int64_t, AudioChannels> audioArea_{};
+        std::array<double, AudioChannels> audioPreviousInput_{}, audioPreviousOutput_{};
     };
 }

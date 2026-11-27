@@ -1,5 +1,6 @@
 #include "Core/Board.h"
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <utility>
 
@@ -9,6 +10,10 @@ namespace R2MEGA::Core
     {
         constexpr std::uint32_t cartridgeRomEnd = 0x3fffff;
         constexpr auto m68kBusDelayInterval = 128 * Scheduler::M68KDivider;
+        constexpr auto audioPhaseStep = Board::AudioSampleRate * Scheduler::Z80Divider;
+        constexpr auto audioBufferLimit = Board::AudioSampleRate / 4 * Board::AudioChannels;
+        constexpr double pcmScale = 1.0 / (32768.0 * Scheduler::MasterClock);
+        const double audioHighPass = std::exp(-2.0 * 3.14159265358979323846 * 20.0 / Board::AudioSampleRate);
 
         [[noreturn]] void notImplemented()
         {
@@ -25,7 +30,6 @@ namespace R2MEGA::Core
     Board::Board() : cpu_(*this), z80_(*this), scheduler_(*this)
     {
         sn76489_.reset();
-        ym2612_.reset();
         vdp_.setDmaReader([this](std::uint32_t address)
                           { return readWord(address); });
     }
@@ -34,6 +38,13 @@ namespace R2MEGA::Core
         if (cartridge.rom().empty())
             throw std::invalid_argument("Cartridge has no ROM image");
         cartridge_ = std::move(cartridge);
+        reset();
+    }
+
+    void Board::reset()
+    {
+        if (cartridge_.rom().empty())
+            return;
         workRam_.clear();
         audioRam_.clear();
         controllers_.reset();
@@ -41,6 +52,11 @@ namespace R2MEGA::Core
         sn76489_.reset();
         ym2612_.reset();
         scheduler_.reset();
+        audioSamples_.clear();
+        audioPhase_ = 0;
+        audioArea_.fill(0);
+        audioPreviousInput_.fill(0.0);
+        audioPreviousOutput_.fill(0.0);
         nextM68KBusDelay_ = m68kBusDelayInterval;
         m68kBusWait_ = 0;
         cpu_.reset();
@@ -113,6 +129,7 @@ namespace R2MEGA::Core
     }
     void Board::clockM68K()
     {
+        ym2612_.clock();
         if (!vdp_.dmaBlocksM68K())
             cpu_.clock();
         else if (scheduler_.masterCycles() >= nextM68KBusDelay_)
@@ -120,12 +137,45 @@ namespace R2MEGA::Core
     }
     void Board::clockZ80()
     {
+        sampleAudio();
         sn76489_.clock();
         if (!z80ResetAsserted_)
         {
             z80_.setIRQ(vdp_.z80InterruptAsserted());
             z80_.tick();
         }
+    }
+
+    void Board::sampleAudio()
+    {
+        // Centraliza o PSG e dá ao FM margem de amplitude antes da soma.
+        const auto psg = sn76489_.sample();
+        const auto &fm = ym2612_.sample();
+        const std::array<std::int64_t, AudioChannels> level{psg + fm[0] * 3 / 4, psg + fm[1] * 3 / 4};
+        for (unsigned channel = 0; channel < AudioChannels; ++channel)
+            audioArea_[channel] += level[channel] * audioPhaseStep;
+        audioPhase_ += audioPhaseStep;
+        if (audioPhase_ < Scheduler::MasterClock)
+            return;
+        audioPhase_ -= Scheduler::MasterClock;
+        const bool accept = audioSamples_.size() < audioBufferLimit;
+        for (unsigned channel = 0; channel < AudioChannels; ++channel)
+        {
+            const auto remainder = level[channel] * audioPhase_;
+            const double input = (audioArea_[channel] - remainder) * pcmScale;
+            audioArea_[channel] = remainder;
+            const double output = input - audioPreviousInput_[channel] + audioHighPass * audioPreviousOutput_[channel];
+            audioPreviousInput_[channel] = input;
+            audioPreviousOutput_[channel] = output;
+            if (accept)
+                audioSamples_.push_back(static_cast<float>(std::clamp(output, -1.0, 1.0)));
+        }
+    }
+
+    void Board::takeAudio(std::vector<float> &samples)
+    {
+        samples.clear();
+        samples.swap(audioSamples_);
     }
     bool Board::z80BusGranted() const
     {
@@ -143,6 +193,7 @@ namespace R2MEGA::Core
         {
             z80_.reset();
             z80_.setBusRequest(z80BusRequested_);
+            ym2612_.reset();
         }
         z80ResetAsserted_ = asserted;
     }
@@ -163,11 +214,11 @@ namespace R2MEGA::Core
                 throw std::logic_error("Barramento do Z80 ainda não concedido ao 68000");
             return audioRam_.read(address & 0x1fff);
         }
-        if (address >= 0xa04000 && address <= 0xa04003)
+        if (address >= 0xa04000 && address < 0xa06000)
         {
             if (!z80BusGranted())
                 throw std::logic_error("Barramento do Z80 ainda não concedido ao 68000");
-            return static_cast<std::uint8_t>(ym2612_.readStatus());
+            return ym2612_.readPort(address & 3);
         }
         if (address == 0xa11100)
             return z80BusGranted() ? 0 : 1;
@@ -193,7 +244,7 @@ namespace R2MEGA::Core
     {
         if (address & 1)
             throw std::invalid_argument("Unaligned 68000 word read");
-        if (address >= 0xa00000 && address <= 0xa03ffe)
+        if (address >= 0xa00000 && address < 0xa06000)
         {
             const auto value = readByte(address);
             return (std::uint16_t(value) << 8) | value;
@@ -228,7 +279,7 @@ namespace R2MEGA::Core
             vdp_.writeData(vdpDataByte(value));
             return;
         }
-        if (address >= 0xa04000 && address <= 0xa04003)
+        if (address >= 0xa04000 && address < 0xa06000)
         {
             if (!z80BusGranted())
                 throw std::logic_error("Barramento do Z80 ainda não concedido ao 68000");
@@ -286,7 +337,7 @@ namespace R2MEGA::Core
             throw std::invalid_argument("Unaligned 68000 word write");
         if (address <= cartridgeRomEnd)
             return;
-        if (address == 0xa04000 || address == 0xa04002)
+        if (address >= 0xa04000 && address < 0xa06000)
         {
             writeByte(address, std::uint8_t(value >> 8));
             return;
@@ -359,7 +410,7 @@ namespace R2MEGA::Core
         if (address < 0x4000)
             return audioRam_.read(address & 0x1fff);
         if (address >= 0x4000 && address < 0x6000)
-            return static_cast<std::uint8_t>(ym2612_.readStatus());
+            return ym2612_.readPort(address & 3);
         if (address >= 0x8000)
         {
             const auto mapped = (std::uint32_t(z80Bank_) << 15) | (address & 0x7fff);
