@@ -1,4 +1,5 @@
 #include "Core/Board.h"
+#include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -79,6 +80,84 @@ namespace
                       (write || board->m68k().state().data[1] == 0x1234),
                   "O MOVE deve terminar em dez ciclos e preservar o dado lido");
         }
+    }
+
+    void testPsgAudio(const std::filesystem::path &directory)
+    {
+        const auto path = directory / "psg-tone.md";
+        std::vector<std::uint8_t> rom(0x200);
+        putWord(rom, 0, 0x00ff);
+        putWord(rom, 2, 0xff00);
+        putWord(rom, 6, 0x100);
+        unsigned pc = 0x100;
+        // Período $0FE no primeiro canal, aproximadamente 440 Hz em NTSC.
+        for (const auto value : {0x8e, 0x0f, 0x90})
+        {
+            for (const auto word : {0x13fc, value, 0x00c0, 0x0011}) // MOVE.B #valor,$C00011.L.
+            {
+                putWord(rom, pc, word);
+                pc += 2;
+            }
+        }
+        putWord(rom, pc, 0x4e72); // STOP #$2700.
+        putWord(rom, pc + 2, 0x2700);
+        const auto saveRom = [&rom](const std::filesystem::path &path)
+        {
+            std::ofstream file(path, std::ios::binary);
+            file.write(reinterpret_cast<const char *>(rom.data()), rom.size());
+            check(bool(file), "Falha ao gravar a ROM de áudio");
+        };
+        saveRom(path);
+
+        auto board = std::make_unique<Board>();
+        board->insertCartridge(Cartridge::load(path));
+        const auto run = [&board](unsigned cycles)
+        {
+            for (unsigned cycle = 0; cycle < cycles; ++cycle)
+                board->clock();
+        };
+        const auto produced = [&board]()
+        {
+            const auto psgCycles = board->masterCycles() / Scheduler::Z80Divider;
+            return psgCycles * Scheduler::Z80Divider * Board::AudioSampleRate / Scheduler::MasterClock *
+                   Board::AudioChannels;
+        };
+        std::vector<float> samples;
+        run(Scheduler::MasterClock / 10);
+        board->takeAudio(samples);
+        check(!samples.empty() && samples.size() == produced() && board->m68k().stopped(),
+              "O PSG deve produzir PCM a 48 kHz mesmo com os processadores parados");
+        const auto [minimum, maximum] = std::minmax_element(samples.begin(), samples.end());
+        check(*minimum < -0.04f && *maximum > 0.04f, "O tom deve ter as duas polaridades no PCM");
+        unsigned risingEdges = 0;
+        for (std::size_t index = 0; index < samples.size(); index += Board::AudioChannels)
+        {
+            check(samples[index] == samples[index + 1], "O PSG mono deve chegar aos dois canais");
+            if (index >= Board::AudioChannels)
+                risingEdges += samples[index - Board::AudioChannels] <= 0 && samples[index] > 0;
+        }
+        check(risingEdges >= 43 && risingEdges <= 45, "A ROM deve gerar um tom de aproximadamente 440 Hz");
+
+        const auto firstCount = samples.size();
+        board->takeAudio(samples);
+        check(samples.empty(), "A coleta deve esvaziar a fila PCM");
+        run(234567);
+        board->takeAudio(samples);
+        check(firstCount + samples.size() == produced(), "A fase de amostragem deve sobreviver à coleta");
+
+        run(10000); // Deixa áudio pendente antes de trocar a ROM.
+        putWord(rom, 0x112, 0x9f);
+        const auto mutedPath = directory / "psg-muted.md";
+        saveRom(mutedPath);
+        board->insertCartridge(Cartridge::load(mutedPath));
+        board->takeAudio(samples);
+        check(samples.empty(), "A troca de ROM deve descartar o PCM anterior");
+        run(10000);
+        board->takeAudio(samples);
+        check(samples.size() == produced() &&
+                  std::all_of(samples.begin(), samples.end(), [](float value)
+                              { return value == 0.0f; }),
+              "A troca de ROM deve reiniciar a fase e o filtro do PSG");
     }
 
     void testCartridgeReset(const std::filesystem::path &directory)
@@ -219,6 +298,7 @@ int main(int argc, char **argv)
         check(argc == 2, "Diretório de saída da ROM ausente");
         const auto directory = std::filesystem::path(argv[1]);
         std::filesystem::create_directories(directory);
+        testPsgAudio(directory);
         testPeriodicBusWait(directory);
         testCartridgeReset(directory);
         const auto path = directory / "m68k-diagnostic.md";

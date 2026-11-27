@@ -8,6 +8,7 @@
 #include <array>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 
 namespace
@@ -18,7 +19,7 @@ namespace
             throw std::runtime_error(message);
     }
 
-    void activateMenu(R2MEGA::Window::Window &window, const char *item, const char *menuName = "File")
+    ImGuiWindow *openMenu(R2MEGA::Window::Window &window, const char *menuName)
     {
         window.render();
         auto *bar = ImGui::FindWindowByName("##MainMenuBar");
@@ -28,6 +29,12 @@ namespace
         window.render();
         auto *menu = ImGui::FindWindowByName("###Menu_00");
         require(menu && menu->Active, "Menu did not open");
+        return menu;
+    }
+
+    void activateMenu(R2MEGA::Window::Window &window, const char *item, const char *menuName = "File")
+    {
+        auto *menu = openMenu(window, menuName);
         ImGui::ActivateItemByID(ImHashStr(item, 0, menu->ID));
         window.render();
     }
@@ -52,12 +59,36 @@ namespace
     {
         const auto previous = std::filesystem::current_path();
         const auto fixtures = previous / "window-test-fixtures";
-        std::filesystem::create_directories(fixtures);
-        std::ofstream(fixtures / "game.bin", std::ios::binary).put('R');
+        const auto games = fixtures / std::filesystem::u8path(u8"sele\u00e7\u00e3o");
+        const auto recentGames = fixtures / "recent=games";
+        const auto game = (games / "game.bin").make_preferred();
+        const auto config = fixtures / "resources/config.ini";
+        const auto oldGame = [&](int number)
+        { return (recentGames / ("old" + std::to_string(number) + ".zip")).make_preferred(); };
+        const auto readConfig = [&]
+        {
+            std::ifstream input(config, std::ios::binary);
+            require(static_cast<bool>(input), "Could not read the ROM preferences");
+            return std::string(std::istreambuf_iterator<char>(input), {});
+        };
+        std::filesystem::create_directories(games);
+        std::filesystem::create_directories(recentGames);
+        std::filesystem::create_directories(config.parent_path());
+        std::ofstream(game, std::ios::binary).put('R');
+        std::ofstream(oldGame(1), std::ios::binary).put('R');
+        {
+            std::ofstream output(config, std::ios::binary);
+            output << "keep_setting=yes\r\nlast_rom_path=" << games.u8string() << "\r\n";
+            for (int i = 1; i <= 10; ++i)
+                output << 'f' << i << '=' << oldGame(i).u8string() << "\r\n";
+        }
+        const auto originalConfig = readConfig();
         std::filesystem::current_path(fixtures);
         try
         {
-            int attempts = 0;
+            int attempts = 0, resets = 0, unloads = 0, videoReads = 0;
+            bool loaded = false;
+            std::array<std::uint32_t, 320 * 224> pixels{};
             using namespace std::chrono;
             using Counter = R2MEGA::Systems::FrameCounter;
             const auto start = Counter::Clock::time_point{};
@@ -65,13 +96,33 @@ namespace
             R2MEGA::Window::Window::EmulationCallbacks emulation;
             emulation.fps = [&counter]()
             { return counter.fps(); };
+            emulation.hasRom = [&loaded]()
+            { return loaded; };
+            emulation.reset = [&]()
+            {
+                ++resets;
+                counter.reset(start);
+            };
+            emulation.unload = [&]()
+            {
+                ++unloads;
+                loaded = false;
+                counter.reset(start);
+            };
             R2MEGA::Window::Window window([&](const std::filesystem::path &path)
                                           {
                 ++attempts;
-                require(path.filename() == "game.bin", "Unexpected selected file");
+                require(path == game || path == oldGame(1), "ROM is unavailable");
                 if (attempts == 1) throw std::runtime_error("Test load failure");
+                loaded = true;
                 counter.reset(start);
-                return std::string("game.bin"); }, {}, {}, {}, {}, std::move(emulation));
+                return path.filename().u8string(); },
+                                          [&]()
+                                          { return loaded ? pixels.data() : nullptr; },
+                                          {}, [&]()
+                                          {
+                ++videoReads;
+                return R2MEGA::Window::Window::VideoStatus{}; }, {}, std::move(emulation));
             window.open();
             window.processEvents();
             int count = 0;
@@ -81,7 +132,20 @@ namespace
             SDL_free(windows);
             const auto title = [native]()
             { return std::string(SDL_GetWindowTitle(native)); };
-            require(title().find(" | FPS: 0.00") != std::string::npos, "Idle title must report zero FPS");
+            const auto idleTitle = title();
+            require(idleTitle.find(" | FPS: 0.00") != std::string::npos, "Idle title must report zero FPS");
+            const auto id = SDL_GetWindowID(native);
+            const auto pressReset = [&](SDL_WindowID target, bool repeat = false, SDL_Keymod mod = SDL_KMOD_NONE)
+            {
+                SDL_Event key{};
+                key.type = SDL_EVENT_KEY_DOWN;
+                key.key.windowID = target;
+                key.key.key = SDLK_F12;
+                key.key.scancode = SDL_SCANCODE_F12;
+                key.key.repeat = repeat;
+                key.key.mod = mod;
+                require(SDL_PushEvent(&key) && window.processEvents(), "Could not process F12");
+            };
             activateMenu(window, "Open...");
             auto selectRom = [&]
             {
@@ -99,12 +163,19 @@ namespace
             require(attempts == 1 && ImGui::FindWindowByName("Open ROM")->Active,
                     "Failed loading must leave the browser open");
             require(title().find("game.bin") == std::string::npos, "Failed loading must leave the title intact");
+            require(readConfig() == originalConfig, "Failed loading must leave the ROM preferences intact");
             selectRom();
             require(attempts == 2, "Selecting a ROM must invoke the loading callback");
             window.render();
             require(!ImGui::FindWindowByName("Open ROM")->Active, "Successful loading must close the browser");
             require(title().find(" | FPS: 0.00 | game.bin") != std::string::npos,
                     "Loaded ROM name must appear after the reset FPS counter");
+            const auto updatedConfig = readConfig();
+            require(updatedConfig.find("f1=" + game.u8string() + '\n') != std::string::npos &&
+                        updatedConfig.find("f10=" + oldGame(9).u8string() + '\n') != std::string::npos &&
+                        updatedConfig.find(oldGame(10).u8string()) == std::string::npos &&
+                        updatedConfig.find("keep_setting=yes\r\n") != std::string::npos,
+                    "Config must preserve other settings and retain the ten most recent ROMs");
 
             for (unsigned frame = 1; frame <= 30; ++frame)
                 counter.record(start + nanoseconds(frame * 500000000ull / 30));
@@ -124,6 +195,63 @@ namespace
             window.render();
             require(title().find(" | FPS: 200.00 | game.bin") != std::string::npos,
                     "The next sample must exclude time spent paused");
+
+            const auto selectRecent = [&](const char *name, int index)
+            {
+                auto *menu = openMenu(window, "File");
+                ImGui::ActivateItemByID(ImHashStr("Recent Files", 0, menu->ID));
+                window.render();
+                auto *recent = ImGui::FindWindowByName("###Menu_01");
+                require(recent && recent->Active, "Recent Files submenu did not open");
+                ImGui::ActivateItemByID(ImHashStr(name, 0, ImHashData(&index, sizeof(index), recent->ID)));
+                window.render();
+                window.render();
+            };
+            selectRecent("old1.zip", 1);
+            require(attempts == 3 && title().find(" | old1.zip") != std::string::npos &&
+                        !ImGui::FindWindowByName("Open ROM")->Active,
+                    "Recent Files must reopen a ROM directly and close the browser");
+            const auto reorderedConfig = readConfig();
+            require(reorderedConfig.find("f1=" + oldGame(1).u8string() + "\nf2=" + game.u8string() +
+                                         "\nf3=" + oldGame(2).u8string() + '\n') != std::string::npos &&
+                        reorderedConfig.find("last_rom_path=" + oldGame(1).parent_path().u8string() + '\n') != std::string::npos,
+                    "Reopening a ROM must move it to the top without duplicates and update the last directory");
+
+            selectRecent("old2.zip", 2);
+            require(attempts == 4 && ImGui::FindWindowByName("Open ROM")->Active &&
+                        readConfig() == reorderedConfig,
+                    "Unavailable recent ROMs must leave the browser open and keep the history intact");
+            pressReset(id);
+            require(resets == 0, "F12 must be ignored while the ROM browser is open");
+            selectRom();
+            require(attempts == 5 && title().find(" | old1.zip") != std::string::npos,
+                    "The browser must return to the last successful directory");
+
+            activateMenu(window, "Reset");
+            require(resets == 1 && loaded && attempts == 5, "File > Reset must restart the loaded ROM");
+            pressReset(id + 1000);
+            pressReset(id, true);
+            pressReset(id, false, SDL_KMOD_CTRL);
+            pressReset(id);
+            require(resets == 2 && readConfig() == reorderedConfig,
+                    "Only plain F12 in this window must reset without changing the ROM history");
+
+            activateMenu(window, "Unload");
+            require(unloads == 1 && !loaded && title() == idleTitle, "Unload must restore the idle window");
+            const auto previousVideoReads = videoReads;
+            pressReset(id);
+            auto *fileMenu = openMenu(window, "File");
+            ImGui::ActivateItemByID(ImHashStr("Reset", 0, fileMenu->ID));
+            window.render();
+            ImGui::ActivateItemByID(ImHashStr("Unload", 0, fileMenu->ID));
+            window.render();
+            require(resets == 2 && unloads == 1 && videoReads == previousVideoReads &&
+                        readConfig() == reorderedConfig,
+                    "Idle window must disable Reset and Unload, stop drawing video, and keep the ROM history");
+            ImGui::ClosePopupsOverWindow(nullptr, false);
+            window.render();
+            selectRecent("old1.zip", 0);
+            require(loaded && attempts == 6, "Recent Files must remain available after unloading a ROM");
         }
         catch (...)
         {

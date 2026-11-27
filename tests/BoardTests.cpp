@@ -51,7 +51,8 @@ int main(int argc, char **argv)
     board.writeByte(0xa04003, 0xa5);
     require(board.ym2612().registerValue(0, 0x22) == 0x5a &&
             board.ym2612().registerValue(1, 0x33) == 0xa5);
-    require(board.readMemory(0x4000) == 0);
+    require(board.readMemory(0x4000) == 0x80 && board.readWord(0xa04000) == 0x8080 &&
+            board.readByte(0xa05000) == 0x80 && board.readByte(0xa04001) == 0);
     board.writeMemory(0x4000, 0x44);
     board.writeMemory(0x4001, 0x66);
     require(board.ym2612().registerValue(0, 0x44) == 0x66);
@@ -145,6 +146,17 @@ int main(int argc, char **argv)
         board.clock();
     require(board.m68k().state().pc == 12 && board.m68k().state().instructions == 2);
     require(board.readWord(0) == 0x00ff && board.m68k().lastException().serial == 0);
+
+    board.writeByte(0xff0000, 0x5a);
+    board.writeByte(0xa00000, 0x5a);
+    board.reset();
+    require(board.masterCycles() == 0 && !board.m68k().resetVectorsLoaded());
+    require(board.readWord(0xff0000) == 0 && board.readByte(0xa00000) == 0);
+    require(board.vdp().cramWord(0) == 0 && board.ym2612().registerValue(0, 0x22) == 0);
+    for (unsigned i = 0; i < 40 * Scheduler::M68KDivider; ++i)
+        board.clock();
+    require(board.m68k().resetComplete() && board.m68k().state().pc == 8 &&
+            board.m68k().state().prefetch[0] == 0x4e71);
 
     board.writeWord(0xff0000, 0x1234);
     require(board.readByte(0xe00000) == 0x12 && board.readByte(0xffffff) == 0);
@@ -401,8 +413,12 @@ int main(int argc, char **argv)
         denied = true;
     }
     require(denied);
+    z80Board->writeMemory(0x5000, 0x22);
+    z80Board->writeMemory(0x5001, 0x08);
+    require(z80Board->readMemory(0x5000) == 0x80 && z80Board->ym2612().registerValue(0, 0x22) == 8);
     z80Board->writeWord(0xa11200, 0); // RESET volta a dar acesso imediato ao 68000.
     require(z80Board->readWord(0xa11100) == 0 && z80Board->z80().state().cycles == 0);
+    require(z80Board->readMemory(0x4000) == 0 && z80Board->ym2612().registerValue(0, 0x22) == 0);
     z80Board->writeByte(0xc00011, 0x82); // O 68000 escreve o PSG pelo byte ímpar.
     z80Board->writeByte(0xc00013, 0x00);
     z80Board->writeWord(0xc00010, 0x0090); // A palavra usa o byte baixo.
