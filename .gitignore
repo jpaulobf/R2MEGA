@@ -7,6 +7,7 @@
 # Local editor settings
 /.vs/
 /.vscode/
+/resources/config.ini
 
 # Games, saves and boot ROMs
 *.gen
