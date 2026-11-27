@@ -1,4 +1,5 @@
 #include "Systems/Engine.h"
+#include "Systems/Audio.h"
 #include "Systems/FrameCounter.h"
 #include "Systems/FramePacer.h"
 #include "Systems/Input.h"
@@ -9,9 +10,11 @@
 #include <exception>
 #include <iomanip>
 #include <iostream>
-#include <optional>
+#include <memory>
 #include <sstream>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace R2MEGA::Systems
 {
@@ -60,8 +63,7 @@ namespace R2MEGA::Systems
     {
         try
         {
-            std::optional<Core::Cartridge> cartridge;
-            Core::Board board;
+            std::unique_ptr<Core::Board> board;
             Input input;
             bool running = false;
             bool paused = false;
@@ -72,12 +74,23 @@ namespace R2MEGA::Systems
             std::string lastError;
             Window::Window::VideoStatus::BusAccess lastBusAccess;
             Window::Window::VideoStatus::CpuException firstCpuException;
+            const auto resetSession = [&]()
+            {
+                lastError.clear();
+                lastBusAccess = {};
+                firstCpuException = {};
+                running = static_cast<bool>(board);
+                paused = false;
+                resetTiming = true;
+                input.clear();
+                frameCounter.reset(Clock::now());
+            };
             const auto rememberCpuException = [&]()
             {
-                const auto &event = board.m68k().lastException();
+                const auto &event = board->m68k().lastException();
                 if (!event.serial || firstCpuException.valid)
                     return;
-                firstCpuException.frame = board.vdp().frame();
+                firstCpuException.frame = board->vdp().frame();
                 firstCpuException.pc = event.pc;
                 firstCpuException.opcode = event.opcode;
                 firstCpuException.vector = event.vector;
@@ -87,7 +100,7 @@ namespace R2MEGA::Systems
             };
             const auto rememberBusAccess = [&]()
             {
-                const auto &pins = board.m68k().pins();
+                const auto &pins = board->m68k().pins();
                 if (!pins.active || !pins.addressStrobe || pins.interruptAcknowledge)
                     return;
                 lastBusAccess.address = pins.address;
@@ -124,52 +137,71 @@ namespace R2MEGA::Systems
             { return paused; };
             emulationCallbacks.fps = [&frameCounter]()
             { return frameCounter.fps(); };
-            Window::Window window([&cartridge, &board, &running, &paused, &resetTiming, &lastError, &lastBusAccess, &firstCpuException, &frameCounter](const std::filesystem::path &path)
-                                  {
-                auto loaded = Core::Cartridge::load(path);
-                auto name = loaded.romName();
-                cartridge = std::move(loaded);
-                board.insertCartridge(*cartridge);
-                lastError.clear();
-                lastBusAccess = {};
-                firstCpuException = {};
-                running = true;
-                paused = false;
-                resetTiming = true;
-                reportLoadedCartridge(*cartridge);
-                frameCounter.reset(Clock::now());
-                return name; }, [&cartridge, &board]() -> const std::uint32_t *
-                                  { return cartridge ? board.vdp().pixels().data() : nullptr; },
-                                  [&running]()
+            emulationCallbacks.hasRom = [&board]()
+            { return static_cast<bool>(board); };
+            emulationCallbacks.reset = [&]()
+            {
+                if (!board)
+                    return;
+                board->reset();
+                resetSession();
+            };
+            emulationCallbacks.unload = [&]()
+            {
+                board.reset();
+                resetSession();
+            };
+            const auto openRom = [&](const std::filesystem::path &path)
+            {
+                auto cartridge = Core::Cartridge::load(path);
+                auto name = cartridge.romName();
+                auto next = std::make_unique<Core::Board>();
+                reportLoadedCartridge(cartridge);
+                next->insertCartridge(std::move(cartridge));
+                board = std::move(next);
+                resetSession();
+                return name;
+            };
+            Window::Window window(openRom, [&board]() -> const std::uint32_t *
+                                  { return board ? board->vdp().pixels().data() : nullptr; }, [&running]()
                                   { return running; }, [&board, &paused, &lastError, &lastBusAccess, &firstCpuException]()
                                   {
                 Window::Window::VideoStatus status;
-                status.frame = board.vdp().frame();
-                status.pc = board.m68k().state().pc;
-                status.opcode = board.m68k().state().prefetch[0];
-                status.sr = board.m68k().state().sr;
-                status.line = board.vdp().line();
-                status.width = board.vdp().visibleWidth();
-                status.displayEnabled = (board.vdp().registerValue(1) & 0x40) != 0;
+                status.frame = board->vdp().frame();
+                status.pc = board->m68k().state().pc;
+                status.opcode = board->m68k().state().prefetch[0];
+                status.sr = board->m68k().state().sr;
+                status.line = board->vdp().line();
+                status.width = board->vdp().visibleWidth();
+                status.displayEnabled = (board->vdp().registerValue(1) & 0x40) != 0;
                 status.paused = paused;
                 status.busAccess = lastBusAccess;
                 status.exception = firstCpuException;
                 status.error = lastError;
                 return status; }, std::move(inputCallbacks), std::move(emulationCallbacks));
             window.open();
+            Audio audio;
+            std::vector<float> audioSamples;
+            const auto disableAudio = [&audio]()
+            {
+                std::cerr << "R2MEGA: saída de áudio desativada: " << SDL_GetError() << '\n';
+                audio.shutdown();
+            };
+            if (!audio.initialize(Core::Board::AudioSampleRate))
+                std::cerr << "R2MEGA: áudio indisponível: " << SDL_GetError() << '\n';
             if (!input.initialize())
                 std::cerr << "R2MEGA: gamepads indisponíveis: " << SDL_GetError() << '\n';
-            constexpr unsigned masterClock = 53693175;
             constexpr unsigned cyclesPerFrame = Core::VDP::masterCyclesPerLine * Core::VDP::linesPerFrame;
             constexpr unsigned fastFramesPerPresent = 4;
-            FramePacer pacer(masterClock, cyclesPerFrame);
+            FramePacer pacer(Core::Scheduler::MasterClock, cyclesPerFrame);
             bool wasFastForward = false;
             unsigned fastFrames = 0;
             while (window.processEvents())
             {
                 const auto buttons = input.update(window.acceptsInput());
-                for (unsigned player = 0; player < buttons.size(); ++player)
-                    board.setControllerButtons(player, buttons[player]);
+                if (board)
+                    for (unsigned player = 0; player < buttons.size(); ++player)
+                        board->setControllerButtons(player, buttons[player]);
                 const bool emulating = running && !paused;
                 const bool fastForward = emulating && window.fastForwardEnabled() && input.fastForwardPressed();
                 const bool vsync = window.synchronizeVSync(fastForward);
@@ -177,6 +209,8 @@ namespace R2MEGA::Systems
                 if (resetTiming || fastForward != wasFastForward)
                 {
                     pacer.reset(now);
+                    if (!audio.clear())
+                        disableAudio();
                     resetTiming = false;
                 }
                 wasFastForward = fastForward;
@@ -186,12 +220,12 @@ namespace R2MEGA::Systems
                                          (fastForward || pacer.takeFrame(now));
                      ++frame)
                 {
-                    const auto previousFrame = board.vdp().frame();
+                    const auto previousFrame = board->vdp().frame();
                     for (unsigned cycle = 0; cycle < cyclesPerFrame; ++cycle)
                     {
                         try
                         {
-                            board.clock();
+                            board->clock();
                             rememberBusAccess();
                             rememberCpuException();
                         }
@@ -201,11 +235,17 @@ namespace R2MEGA::Systems
                             rememberCpuException();
                             running = false;
                             lastError = error.what();
+                            if (!audio.clear())
+                                disableAudio();
                             break;
                         }
                     }
-                    if (board.vdp().frame() != previousFrame)
+                    if (board->vdp().frame() != previousFrame)
                         frameCounter.record(Clock::now());
+                    board->takeAudio(audioSamples);
+                    if (running && !fastForward &&
+                        !audio.submit(audioSamples.data(), audioSamples.size(), Core::Board::AudioChannels))
+                        disableAudio();
                 }
                 // Entre quadros acelerados, volta ao processamento de eventos para ler a soltura de Tab.
                 if (running && fastForward && ++fastFrames < fastFramesPerPresent)
