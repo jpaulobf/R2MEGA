@@ -18,6 +18,7 @@ namespace R2MEGA::Core
     class Scheduler
     {
     public:
+        static constexpr unsigned MasterClock = 53693175;
         static constexpr unsigned M68KDivider = 7;
         static constexpr unsigned Z80Divider = 15;
 
