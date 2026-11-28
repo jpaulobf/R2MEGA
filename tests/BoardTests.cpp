@@ -1,10 +1,12 @@
 #include "Core/Board.h"
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 using namespace R2MEGA::Core;
@@ -447,6 +449,76 @@ int main(int argc, char **argv)
         z80Board->writeWord(0xa06000, std::uint16_t(((0x1fe >> bit) & 1) << 8));
     z80Board->writeByte(0xff0000, 0x76);
     require(z80Board->readMemory(0x8000) == 0x76); // O 68000 também programa o banco.
+
+    {
+        std::vector<unsigned char> saveRom(0x200000);
+        const char console[] = "SEGA GENESIS";
+        std::copy_n(console, sizeof(console) - 1, saveRom.begin() + 0x100);
+        const auto makeSaveRom = [&](const std::filesystem::path &romPath, std::string_view product)
+        {
+            std::copy(product.begin(), product.end(), saveRom.begin() + 0x180);
+            std::ofstream file(romPath, std::ios::binary);
+            file.write(reinterpret_cast<const char *>(saveRom.data()), saveRom.size());
+            file.close();
+            require(bool(file));
+            return Cartridge::load(romPath);
+        };
+        saveRom[1] = 0x19;
+        saveRom[0x4001] = 0x27;
+
+        const auto savePath = directory / "board-save-ram.bin";
+        board.insertCartridge(makeSaveRom(savePath, "GM T-172156-01"));
+        require(board.readWord(0x200000) == 0xffff && board.readByte(0x200001) == 0xff);
+        require(board.readByte(0x204001) == 0x27);
+        board.writeByte(0x200000, 0x23);
+        require(board.readWord(0x200000) == 0xffff);
+        board.writeWord(0x200000, 0x34a5);
+        require(board.readWord(0x200000) == 0xffa5 && board.readByte(1) == 0x19);
+        board.writeByte(0x203fff, 0x6b);
+        require(board.readWord(0x203ffe) == 0xff6b);
+        for (unsigned bit = 0; bit < 9; ++bit)
+            board.writeMemory(0x6000, std::uint8_t((0x40 >> bit) & 1));
+        require(board.readMemory(0x8001) == 0xa5);
+        board.writeMemory(0x8001, 0x41);
+        board.reset();
+        require(board.readWord(0x200000) == 0xff41);
+        board.insertCartridge(Cartridge::load(path));
+        require(board.readWord(0x200000) == 0x00ff);
+        board.insertCartridge(Cartridge::load(savePath));
+        require(board.readWord(0x200000) == 0xffff);
+
+        saveRom[0x401] = 0x2b;
+        saveRom[6] = 0x20;
+        saveRom[0x2000] = 0x4e;
+        saveRom[0x2001] = 0x70; // RESET.
+        board.insertCartridge(makeSaveRom(directory / "board-banked-save.bin", "GM MK-1079 -00"));
+        require(board.readWord(0x200000) == 0x0019);
+        board.writeByte(0x200001, 0x39);
+        board.writeByte(0xa130f0, 1);
+        require(board.readWord(0x200000) == 0x0019);
+        board.writeWord(0xa130f0, 0x0003);
+        require(board.readWord(0x200000) == 0xffff && board.readByte(0x200401) == 0x2b);
+        board.writeWord(0x200000, 0xab42);
+        board.writeByte(0x2003ff, 0x6b);
+        require(board.readWord(0x200000) == 0xff42 && board.readWord(0x2003fe) == 0xff6b);
+        board.writeByte(0xa130f1, 2);
+        require(board.readWord(0x200000) == 0x0019);
+        board.writeByte(0xa130f1, 1);
+        require(board.readWord(0x200000) == 0xff42);
+        for (unsigned cycle = 0; cycle < 1000 && !board.cartridgeVresAsserted(); ++cycle)
+            board.clock();
+        require(board.cartridgeVresAsserted() && board.readWord(0x200000) == 0x0019);
+        for (unsigned cycle = 0; cycle < 1000 && board.cartridgeVresAsserted(); ++cycle)
+            board.clock();
+        require(!board.cartridgeVresAsserted() && board.readWord(0x200000) == 0x0019);
+        board.writeByte(0xa130f1, 1);
+        require(board.readWord(0x200000) == 0xff42);
+        board.reset();
+        require(board.readWord(0x200000) == 0x0019);
+        board.writeByte(0xa130f1, 1);
+        require(board.readWord(0x200000) == 0xff42 && board.readWord(0x2003fe) == 0xff6b);
+    }
+
     const auto framePath = directory / "vdp-dma-frame.ppm";
     {
         std::ofstream frame(framePath, std::ios::binary);

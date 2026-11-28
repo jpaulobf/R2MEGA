@@ -324,6 +324,38 @@ namespace
         require(!debugDrawn(), "A second F1 press must hide the debug overlay");
     }
 
+    void testIntegerScaling()
+    {
+        std::array<std::uint32_t, 320 * 224> pixels{};
+        pixels.fill(0xff123456);
+        using Window = R2MEGA::Window::Window;
+        Window window({}, [&]()
+                      { return pixels.data(); });
+        window.open();
+        int count = 0;
+        SDL_Window **windows = SDL_GetWindows(&count);
+        require(windows && count == 1, "Expected one SDL window to verify scaling");
+        auto *native = windows[0];
+        SDL_free(windows);
+        require(SDL_SetWindowSize(native, 800, 600), "Could not resize the test window");
+        window.processEvents();
+        const auto videoAt = [&](int x)
+        {
+            const SDL_Rect rect{x, 300, 1, 1};
+            const std::unique_ptr<SDL_Surface, decltype(&SDL_DestroySurface)> pixel(
+                SDL_RenderReadPixels(SDL_GetRenderer(native), &rect), SDL_DestroySurface);
+            Uint8 red, green, blue, alpha;
+            require(pixel && SDL_ReadSurfacePixel(pixel.get(), 0, 0, &red, &green, &blue, &alpha),
+                    "Could not read the software renderer's output");
+            return red == 0x12 && green == 0x34 && blue == 0x56;
+        };
+        window.render();
+        require(!videoAt(143) && videoAt(144) && videoAt(655) && !videoAt(656),
+                "Integer scaling must center the 256-pixel image at exactly 2x");
+        activateMenu(window, "Integer Scaling", "Display");
+        require(videoAt(143) && videoAt(656), "Disabling integer scaling must fit more of the window");
+    }
+
     void testInputMenu()
     {
         bool joystick[2]{};
@@ -567,6 +599,7 @@ int main()
         testAbout();
         testRomSelection();
         testVideoOutput();
+        testIntegerScaling();
         testInputMenu();
         testKeyboardToWindow();
         testSpeedControls();

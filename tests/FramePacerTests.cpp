@@ -40,12 +40,41 @@ namespace
         else
             require(batched, "A slower display must sometimes run multiple frames before presentation");
     }
+
+    void checkVSyncJitter()
+    {
+        FramePacer pacer(masterClock, cyclesPerFrame);
+        constexpr unsigned refreshRate = 60;
+        constexpr auto displayLead = nanosecondsPerSecond / refreshRate / 2;
+        constexpr std::uint64_t jitter = 1000000;
+        pacer.reset(jitter);
+        unsigned totalFrames = 0;
+        for (unsigned refresh = 0; refresh <= 60 * refreshRate; ++refresh)
+        {
+            const auto now = refresh * nanosecondsPerSecond / refreshRate +
+                             (refresh % 2 ? 0 : 2 * jitter);
+            if (pacer.takeFrame(now, displayLead))
+            {
+                ++totalFrames;
+                require(!pacer.takeFrame(now), "VSync jitter must not cause a catch-up frame at 60 Hz");
+            }
+        }
+        require(totalFrames == 1 + 60ull * masterClock / cyclesPerFrame,
+                "VSync lead must not accumulate or change the native rate");
+
+        pacer.reset(0);
+        require(pacer.takeFrame(0, displayLead), "The first frame must be ready immediately");
+        const auto delayed = 3 * nanosecondsPerSecond / refreshRate;
+        require(pacer.takeFrame(delayed, displayLead) && pacer.takeFrame(delayed),
+                "A missed presentation must still allow overdue frames to catch up");
+    }
 }
 
 int main()
 {
     for (const unsigned refreshRate : {30, 60, 120, 144})
         checkPresentation(refreshRate);
+    checkVSyncJitter();
 
     FramePacer pacer(masterClock, cyclesPerFrame);
     constexpr std::uint64_t start = 100 * nanosecondsPerSecond;
