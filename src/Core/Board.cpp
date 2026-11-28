@@ -8,7 +8,6 @@ namespace R2MEGA::Core
 {
     namespace
     {
-        constexpr std::uint32_t cartridgeRomEnd = 0x3fffff;
         constexpr auto m68kBusDelayInterval = 128 * Scheduler::M68KDivider;
         constexpr auto audioPhaseStep = Board::AudioSampleRate * Scheduler::Z80Divider;
         constexpr auto audioBufferLimit = Board::AudioSampleRate / 4 * Board::AudioChannels;
@@ -45,6 +44,7 @@ namespace R2MEGA::Core
     {
         if (cartridge_.rom().empty())
             return;
+        cartridge_.resetMapper();
         workRam_.clear();
         audioRam_.clear();
         controllers_.reset();
@@ -102,6 +102,8 @@ namespace R2MEGA::Core
         if (cartridgeVresAsserted_ == asserted)
             return;
         cartridgeVresAsserted_ = asserted;
+        if (asserted)
+            cartridge_.resetMapper();
         if (cartridgeVresHandler_)
             cartridgeVresHandler_(asserted);
     }
@@ -204,8 +206,8 @@ namespace R2MEGA::Core
     }
     std::uint8_t Board::readByte(std::uint32_t address)
     {
-        if (address <= cartridgeRomEnd)
-            return cartridge_.rom().at(address);
+        if (address <= Cartridge::windowEnd)
+            return cartridge_.readByte(address);
         if (address >= 0xa10000 && address <= 0xa1001f)
             return controllers_.readByte(address - 0xa10000);
         if (address >= 0xa00000 && address <= 0xa03fff)
@@ -272,8 +274,18 @@ namespace R2MEGA::Core
 
     void Board::writeByte(std::uint32_t address, std::uint8_t value)
     {
-        if (address <= cartridgeRomEnd)
-            return; // O barramento conclui a escrita sem alterar a ROM.
+        if (address <= Cartridge::windowEnd)
+        {
+            cartridge_.writeByte(address, value);
+            return;
+        }
+        if (address == Cartridge::saveControlAddress)
+        {
+            cartridge_.writeSaveControl(value);
+            return;
+        }
+        if (address == Cartridge::saveControlAddress - 1)
+            return; // O registrador usa somente o byte baixo.
         if (address >= 0xc00000 && address <= 0xc00003)
         {
             vdp_.writeData(vdpDataByte(value));
@@ -335,8 +347,17 @@ namespace R2MEGA::Core
     {
         if (address & 1)
             throw std::invalid_argument("Unaligned 68000 word write");
-        if (address <= cartridgeRomEnd)
+        if (address == Cartridge::saveControlAddress - 1)
+        {
+            writeByte(Cartridge::saveControlAddress, std::uint8_t(value));
             return;
+        }
+        if (address <= Cartridge::windowEnd)
+        {
+            cartridge_.writeByte(address, std::uint8_t(value >> 8));
+            cartridge_.writeByte(address + 1, std::uint8_t(value));
+            return;
+        }
         if (address >= 0xa04000 && address < 0xa06000)
         {
             writeByte(address, std::uint8_t(value >> 8));
@@ -414,8 +435,8 @@ namespace R2MEGA::Core
         if (address >= 0x8000)
         {
             const auto mapped = (std::uint32_t(z80Bank_) << 15) | (address & 0x7fff);
-            if (mapped <= cartridgeRomEnd)
-                return cartridge_.rom().at(mapped);
+            if (mapped <= Cartridge::windowEnd)
+                return cartridge_.readByte(mapped);
             if (mapped >= 0xe00000)
                 return workRam_.read(mapped & 0xffff);
         }
@@ -436,12 +457,16 @@ namespace R2MEGA::Core
         if (address >= 0x8000)
         {
             const auto mapped = (std::uint32_t(z80Bank_) << 15) | (address & 0x7fff);
+            if (mapped <= Cartridge::windowEnd)
+            {
+                cartridge_.writeByte(mapped, value);
+                return;
+            }
             if (mapped >= 0xe00000)
             {
                 workRam_.write(mapped & 0xffff, value);
                 return;
             }
-            // Outros dispositivos e a SRAM de cartuchos ainda não passam por esta janela.
             notImplemented();
         }
         if (address == 0x7f11 || address == 0x7f13 ||

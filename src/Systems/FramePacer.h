@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
 
@@ -24,12 +25,16 @@ namespace R2MEGA::Systems
             remainder_ = 0;
         }
 
-        bool takeFrame(std::uint64_t now)
+        bool takeFrame(std::uint64_t now, std::uint64_t displayLead = 0)
         {
             if (now < deadline_)
-                return false;
-            // Recupera atrasos curtos e reinicia a agenda após uma espera longa.
-            if (now - deadline_ > maxFramesPerPresent * (frameNumerator_ / clockFrequency_))
+            {
+                const auto halfFrame = frameNumerator_ / clockFrequency_ / 2;
+                if (deadline_ - now > std::min(displayLead, halfFrame))
+                    return false;
+            }
+            else if (now - deadline_ > maxFramesPerPresent * (frameNumerator_ / clockFrequency_))
+                // Recupera atrasos curtos e reinicia a agenda após uma espera longa.
                 reset(now);
             remainder_ += frameNumerator_;
             deadline_ += remainder_ / clockFrequency_;

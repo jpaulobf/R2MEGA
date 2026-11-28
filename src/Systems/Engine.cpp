@@ -215,9 +215,10 @@ namespace R2MEGA::Systems
                 }
                 wasFastForward = fastForward;
                 const unsigned framesPerIteration = fastForward ? 1 : FramePacer::maxFramesPerPresent;
-                // O clock da placa determina quais quadros estão prontos para emular.
+                const auto displayLead = vsync ? window.refreshPeriod() / 2 : 0;
+                // Absorve variações do VSync no primeiro quadro. Quadros de recuperação precisam estar vencidos.
                 for (unsigned frame = 0; emulating && running && frame < framesPerIteration &&
-                                         (fastForward || pacer.takeFrame(now));
+                                         (fastForward || pacer.takeFrame(now, frame == 0 ? displayLead : 0));
                      ++frame)
                 {
                     const auto previousFrame = board->vdp().frame();
