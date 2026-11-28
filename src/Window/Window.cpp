@@ -36,7 +36,9 @@ namespace R2MEGA::Window
         KeyboardDialog keyboardDialog;
         bool focused = false, minimized = false;
         bool vsyncEnabled = true, fastForwardEnabled = true;
+        bool integerScaling = true;
         bool vsyncActive = false;
+        std::uint64_t refreshPeriod = 0;
         explicit Impl(OpenHandler handler, VideoProvider video,
                       RunningProvider running, VideoStatusProvider status, InputCallbacks input,
                       EmulationCallbacks emulation)
@@ -51,6 +53,13 @@ namespace R2MEGA::Window
         bool hasRom() const
         {
             return emulationCallbacks.hasRom && emulationCallbacks.hasRom();
+        }
+
+        void updateRefreshPeriod()
+        {
+            const auto *mode = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window));
+            const double rate = mode ? mode->refresh_rate : 0;
+            refreshPeriod = std::isfinite(rate) && rate >= 1 ? static_cast<std::uint64_t>(SDL_NS_PER_SECOND / rate) : 0;
         }
 
         void updateTitle()
@@ -104,10 +113,11 @@ namespace R2MEGA::Window
         s.keyboardDialog.setMapping(s.keyboardConfig.load());
         if (s.inputCallbacks.setKeyboardMapping)
             s.inputCallbacks.setKeyboardMapping(s.keyboardDialog.mapping());
-        s.window = SDL_CreateWindow(Impl::applicationTitle, 960, 672,
+        s.window = SDL_CreateWindow(Impl::applicationTitle, 960, 720,
                                     SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
         if (!s.window)
             throw std::runtime_error(SDL_GetError());
+        s.updateRefreshPeriod();
         s.updateTitle();
         s.focused = (SDL_GetWindowFlags(s.window) & SDL_WINDOW_INPUT_FOCUS) != 0;
         s.renderer = SDL_CreateRenderer(s.window, nullptr);
@@ -160,6 +170,9 @@ namespace R2MEGA::Window
                 s.minimized = true;
             if (event.type == SDL_EVENT_WINDOW_RESTORED && event.window.windowID == SDL_GetWindowID(s.window))
                 s.minimized = false;
+            if (event.type == SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED ||
+                (event.type == SDL_EVENT_WINDOW_DISPLAY_CHANGED && event.window.windowID == SDL_GetWindowID(s.window)))
+                s.updateRefreshPeriod();
             if (event.type == SDL_EVENT_QUIT ||
                 (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && event.window.windowID == SDL_GetWindowID(s.window)))
                 s.running = false;
@@ -223,6 +236,11 @@ namespace R2MEGA::Window
         return s.vsyncActive;
     }
 
+    std::uint64_t Window::refreshPeriod() const
+    {
+        return impl_->refreshPeriod;
+    }
+
     void Window::render()
     {
         auto &s = *impl_;
@@ -269,6 +287,7 @@ namespace R2MEGA::Window
             if (ImGui::BeginMenu("Display"))
             {
                 ImGui::MenuItem("VSync", nullptr, &s.vsyncEnabled);
+                ImGui::MenuItem("Integer Scaling", nullptr, &s.integerScaling);
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Input"))
@@ -432,14 +451,16 @@ namespace R2MEGA::Window
             int outputWidth = 0, outputHeight = 0;
             if (!SDL_GetRenderOutputSize(s.renderer, &outputWidth, &outputHeight))
                 throw std::runtime_error(SDL_GetError());
-            const float menuHeight = ImGui::GetFrameHeight() * ImGui::GetIO().DisplayFramebufferScale.y;
+            const float menuHeight = std::ceil(ImGui::GetFrameHeight() * ImGui::GetIO().DisplayFramebufferScale.y);
             const float availableHeight = std::max(0.0f, outputHeight - menuHeight);
-            const float scale = std::min(outputWidth / float(videoWidth), availableHeight / 224.0f);
+            float scale = std::min(outputWidth / float(videoWidth), availableHeight / 224.0f);
+            if (s.integerScaling && scale >= 1)
+                scale = std::floor(scale);
             if (scale > 0)
             {
                 const SDL_FRect source{0, 0, float(videoWidth), 224};
-                const SDL_FRect destination{(outputWidth - videoWidth * scale) * 0.5f,
-                                            menuHeight + (availableHeight - 224.0f * scale) * 0.5f,
+                const SDL_FRect destination{std::floor((outputWidth - videoWidth * scale) * 0.5f),
+                                            menuHeight + std::floor((availableHeight - 224.0f * scale) * 0.5f),
                                             videoWidth * scale, 224.0f * scale};
                 if (!SDL_RenderTexture(s.renderer, s.videoTexture, &source, &destination))
                     throw std::runtime_error(SDL_GetError());

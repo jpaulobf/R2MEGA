@@ -92,6 +92,8 @@ namespace R2MEGA::Window
         bool fastForwardEnabled() const;
         // Aplica a preferência do menu, suspensa durante o avanço rápido, e retorna o VSync efetivo.
         bool synchronizeVSync(bool fastForward);
+        // Intervalo nominal entre atualizações do monitor, em nanossegundos.
+        std::uint64_t refreshPeriod() const;
         void render();
 
     private:
