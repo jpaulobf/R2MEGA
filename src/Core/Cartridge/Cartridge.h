@@ -1,4 +1,5 @@
 #pragma once
+#include "Core/Memory/CartridgeSRAM.h"
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -8,10 +9,13 @@
 
 namespace R2MEGA::Core
 {
-    // Armazena a imagem normalizada da ROM e sua origem, independentemente do barramento.
+    // Armazena a imagem normalizada da ROM, sua origem e o mapa do cartucho.
     class Cartridge
     {
     public:
+        static constexpr std::uint32_t windowEnd = 0x3fffff;
+        static constexpr std::uint32_t saveControlAddress = 0xa130f1;
+
         struct Header
         {
             static constexpr std::size_t offset = 0x100;
@@ -34,9 +38,19 @@ namespace R2MEGA::Core
         // A referência permanece válida enquanto o cartucho e sua imagem existirem.
         const std::vector<std::uint8_t> &rom() const { return rom_; }
 
+        std::uint8_t readByte(std::uint32_t address) const;
+        void writeByte(std::uint32_t address, std::uint8_t value);
+        void writeSaveControl(std::uint8_t value);
+        void resetMapper();
+
     private:
+        bool selectsSaveRam(std::uint32_t address) const;
         std::filesystem::path path_;
         std::string romName_;
         std::vector<std::uint8_t> rom_;
+        std::uint32_t romMask_ = 0;
+        CartridgeSRAM saveRam_;
+        bool bankedSaveRam_ = false;
+        bool saveRamEnabled_ = true;
     };
 }

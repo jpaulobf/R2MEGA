@@ -7,6 +7,11 @@
 
 namespace R2MEGA::Core
 {
+    namespace
+    {
+        constexpr std::uint32_t saveRamBase = 0x200000;
+    }
+
     Cartridge Cartridge::load(const std::filesystem::path &path)
     {
         Cartridge result;
@@ -33,7 +38,57 @@ namespace R2MEGA::Core
                 }
             result.rom_ = std::move(decoded);
         }
+
+        // Linhas de endereço sem conexão repetem o próximo espaço de endereçamento da ROM.
+        while (result.romMask_ < windowEnd && result.romMask_ + 1 < result.rom_.size())
+            result.romMask_ = (result.romMask_ << 1) | 1;
+
+        const auto header = result.header();
+        if (header && result.rom_.size() == saveRamBase)
+        {
+            // A placa do FIFA '97 tem SRAM de 8 KiB e o cabeçalho omite o campo RA.
+            if (header->productCode == "GM T-172156-01")
+                result.saveRam_ = CartridgeSRAM(0x2000, 0xff);
+            // O Sonic 3 seleciona a FRAM de 512 bytes no byte baixo da janela $200000-$2003FF.
+            else if (header->productCode == "GM MK-1079 -00")
+            {
+                result.saveRam_ = CartridgeSRAM(0x200, 0xff);
+                result.bankedSaveRam_ = true;
+            }
+        }
+        result.resetMapper();
         return result;
+    }
+
+    void Cartridge::writeSaveControl(std::uint8_t value)
+    {
+        if (bankedSaveRam_)
+            saveRamEnabled_ = (value & 1) != 0;
+    }
+
+    void Cartridge::resetMapper()
+    {
+        saveRamEnabled_ = !bankedSaveRam_;
+    }
+
+    bool Cartridge::selectsSaveRam(std::uint32_t address) const
+    {
+        return saveRamEnabled_ && address >= saveRamBase &&
+               (address - saveRamBase) / 2 < saveRam_.size();
+    }
+
+    std::uint8_t Cartridge::readByte(std::uint32_t address) const
+    {
+        if (selectsSaveRam(address))
+            return address & 1 ? saveRam_.read((address - saveRamBase) / 2) : 0xff;
+        const auto offset = address & romMask_;
+        return offset < rom_.size() ? rom_[offset] : 0xff;
+    }
+
+    void Cartridge::writeByte(std::uint32_t address, std::uint8_t value)
+    {
+        if ((address & 1) && selectsSaveRam(address))
+            saveRam_.write((address - saveRamBase) / 2, value);
     }
 
     std::optional<Cartridge::Header> Cartridge::header() const
