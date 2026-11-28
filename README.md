@@ -4,6 +4,8 @@ Emulador de Sega Mega Drive / Genesis em C++17, em desenvolvimento. O núcleo
 inclui M68000, Z80, VDP, PSG, YM2612 e controles de três botões. A precisão de
 ciclos e a renderização dot a dot ainda estão em evolução.
 
+Consulte os resultados dos testes na [lista de compatibilidade](COMPATIBILITY_LIST.md).
+
 ## Compilação
 
 Requer CMake 3.16+, compilador C++17 e Git. A configuração gráfica obtém zlib,
@@ -66,6 +68,11 @@ trabalho; `Default` restaura o padrão no diálogo.
 A emulação segue o relógio do console em ambos os modos, a cerca de 59,92 FPS
 no perfil NTSC atual. Num monitor mais rápido, a janela pode reapresentar o
 último quadro. O título mostra os FPS emulados.
+
+`Display > Integer Scaling` começa ativado e usa o maior múltiplo inteiro que
+cabe na janela. Isso mantém todos os pixels do jogo com o mesmo tamanho durante
+o scroll. A janela usa escala fracionária quando o vídeo fica menor que a
+resolução original ou quando a opção está desativada.
 
 `Hacks > Enable Fast-Forward` permite acelerar enquanto Tab estiver pressionado
 e suspende temporariamente o VSync durante o avanço rápido.
